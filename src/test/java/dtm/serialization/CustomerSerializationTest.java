@@ -149,6 +149,12 @@ public class CustomerSerializationTest {
         }
     }
 
+    public static enum TesteEnum{
+        ENUM_1,
+        ENUM_2,
+        ENUM_3
+    }
+
 
     private static BinaryObjectEncoderMapper encoder;
     private static BinaryObjectDecoderMapper decoder;
@@ -298,5 +304,21 @@ public class CustomerSerializationTest {
 
         byte[] reSerialized = encoder.encodeToByteArray(deserialized);
         assertArrayEquals(serialized, reSerialized, "O array de String serializado deve ser consistente");
+    }
+
+    @Test
+    void testEnum() throws Exception {
+        List<TesteEnum> enums = new ArrayList<>(){{
+            add(TesteEnum.ENUM_1);
+            add(TesteEnum.ENUM_2);
+            add(TesteEnum.ENUM_3);
+        }};
+
+        byte[] serialized = encoder.encodeToByteArray(enums);
+
+        List<TesteEnum> deserialized = decoder.readAsTree(serialized).getAsObject(new CollectionReference<List<TesteEnum>>(){});
+
+        byte[] reSerialized = encoder.encodeToByteArray(deserialized);
+        assertArrayEquals(serialized, reSerialized, "O array de TesteEnum serializado deve ser consistente");
     }
 }
