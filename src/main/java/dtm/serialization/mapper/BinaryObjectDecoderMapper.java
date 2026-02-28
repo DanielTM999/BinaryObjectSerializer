@@ -554,6 +554,27 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             return null;
         }
 
+        if(fieldType.isEnum()){
+            if (nodeType != ObjectType.STRING) {
+                throw new DecodeSerializationException(
+                        String.format("Field '%s' expected STRING for enum '%s' but found %s in node '%s'",
+                                elementName, fieldType.getSimpleName(), nodeType, node.getName())
+                );
+            }
+
+            String enumName = node.getAsString();
+            try {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                Object enumValue = Enum.valueOf((Class<Enum>) fieldType, enumName);
+                return enumValue;
+            } catch (IllegalArgumentException e) {
+                throw new DecodeSerializationException(
+                        String.format("Field '%s' could not map value '%s' to enum '%s' in node '%s'",
+                                elementName, enumName, fieldType.getSimpleName(), node.getName()), e
+                );
+            }
+        }
+
         if (fieldType.equals(AtomicBoolean.class) || fieldType.equals(Boolean.class) || fieldType.equals(boolean.class)) {
             if (nodeType != ObjectType.BOOLEAN) {
                 throw new DecodeSerializationException(

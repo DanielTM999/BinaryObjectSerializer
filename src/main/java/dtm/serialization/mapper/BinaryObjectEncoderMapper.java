@@ -64,7 +64,9 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
 
         Class<?> type = value.getClass();
 
-        if (value instanceof Byte aByte) {
+        if(type.isEnum()){
+            writeString(out, ((Enum<?>) value).name(), fieldName);
+        } else if (value instanceof Byte aByte) {
             writeBytes(out, new byte[]{aByte}, fieldName);
         }else if (type == byte[].class) {
             writeBytes(out, (byte[]) value, fieldName);
