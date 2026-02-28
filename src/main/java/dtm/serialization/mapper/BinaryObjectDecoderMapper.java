@@ -69,6 +69,22 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         return  readAsTree(stream).getAsObject(ref);
     }
 
+
+    @Override
+    public <T extends Collection<?>> T readAsCollection(byte[] bytes, CollectionReference<T> ref) throws DecodeSerializationException {
+        return readAsTree(bytes).getAsObject(ref);
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollection(File file, CollectionReference<T> ref) throws DecodeSerializationException {
+        return readAsTree(file).getAsObject(ref);
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollection(InputStream stream, CollectionReference<T> ref) throws DecodeSerializationException {
+        return  readAsTree(stream).getAsObject(ref);
+    }
+
     private void validSignedByte(DataInputStream in) throws IOException {
         byte validator = in.readByte();
         if (validator != (byte) 0xAA) {
