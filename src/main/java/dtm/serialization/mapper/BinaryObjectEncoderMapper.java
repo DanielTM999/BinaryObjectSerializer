@@ -94,6 +94,8 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             writeBoolean(out, ab.get(), fieldName);
         } else if (value instanceof AtomicInteger ai) {
             writeInt(out, ai.get(), fieldName);
+        }else if (value instanceof Character c) {
+            writeString(out, String.valueOf(c), fieldName);
         }
 
         else{
