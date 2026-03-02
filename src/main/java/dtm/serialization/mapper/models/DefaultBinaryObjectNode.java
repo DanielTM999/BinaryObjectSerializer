@@ -190,7 +190,7 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
             } else if (node.getObjectType() == ObjectType.BYTE) {
                 objectMap.put(node.getName(), node.getAsBytes());
             }else if (node.getObjectType() == ObjectType.LIST){
-                objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Map<String, Object>>>(){}));
+                objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Object>>(){}));
             }
         }
 

@@ -203,7 +203,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @SuppressWarnings("unchecked")
     private <T> T convertTo(Object obj, BinaryObjectNode node){
         if (obj instanceof Class<?>) {
-            return convertTo((Class<T>)obj, node);
+            return (T)convertTo((Class<T>)obj, node);
         }else if(obj instanceof CollectionReference<?> ref){
             return (T) convertToCollection(ref, node);
         }
@@ -213,7 +213,24 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         );
     }
 
-    private <T> T convertTo(Class<T> clazz, BinaryObjectNode node){
+    private Object convertTo(Class<?> clazz, BinaryObjectNode node){
+
+
+        if(clazz == Object.class){
+            if(node.getObjectType() == ObjectType.NULL) return null;
+
+            clazz = switch (node.getObjectType()){
+                case LIST -> List.class;
+                case STRING -> String.class;
+                case BOOLEAN -> Boolean.class;
+                case BYTE -> Byte.class;
+                case INT -> Integer.class;
+                case DOUBLE -> Double.class;
+                case LONG -> Long.class;
+                default -> Map.class;
+            };
+        }
+
         if(isSimpleType(clazz)){
             return convertSimpleType(clazz, node);
         }
@@ -238,7 +255,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             return clazz.cast(convertToMap(node));
         }
 
-        T instance = createInstanceOf(clazz);
+        Object instance = createInstanceOf(clazz);
         List<FieldCacheProps> fieldCacheProps = resolveFields(clazz, SerializationType.DECODE);
 
         for (FieldCacheProps fieldCacheProp : fieldCacheProps) {
