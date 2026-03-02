@@ -305,16 +305,12 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         for (BinaryObjectNode childNode : node.getChildren()) {
             E value;
 
-            if (elementType instanceof Class<?> clazz) {
-                if (isSimpleType(clazz)) {
-                    value = (E) getValueOnSimpleObject(clazz, "", childNode);
-                } else {
-                    value = (E) convertTo(clazz, childNode);
-                }
+
+            Class<?> clazz = resolveRawClass(elementType);
+            if (isSimpleType(clazz)) {
+                value = (E) getValueOnSimpleObject(clazz, "", childNode);
             } else {
-                throw new DecodeSerializationException(
-                        "Unsupported generic element type: " + elementType
-                );
+                value = (E) convertTo(clazz, childNode);
             }
             collection.add(value);
         }
@@ -325,25 +321,23 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     private Map<String, Object> convertToMap(BinaryObjectNode node){
         Map<String, Object> objectMap = new ConcurrentHashMap<>();
 
-        node.getChildren().forEach(child -> {
-            if(node.getObjectType() == ObjectType.OBJECT){
-                objectMap.put(node.getName(), node.getAsMap());
-            }else if(node.getObjectType() == ObjectType.STRING){
-                objectMap.put(node.getName(), node.getAsString());
-            }else if(node.getObjectType() == ObjectType.INT){
-                objectMap.put(node.getName(), node.getAsInt());
-            }else if(node.getObjectType() == ObjectType.LONG){
-                objectMap.put(node.getName(), node.getAsLong());
-            }else if(node.getObjectType() == ObjectType.DOUBLE){
-                objectMap.put(node.getName(), node.getAsDouble());
-            }else if(node.getObjectType() == ObjectType.BOOLEAN){
-                objectMap.put(node.getName(), node.getAsBoolean());
-            } else if (node.getObjectType() == ObjectType.BYTE) {
-                objectMap.put(node.getName(), node.getAsBytes());
-            }else if (node.getObjectType() == ObjectType.LIST){
-                objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Map<String, Object>>>(){}));
-            }
-        });
+        if(node.getObjectType() == ObjectType.OBJECT){
+            objectMap.put(node.getName(), node.getAsMap());
+        }else if(node.getObjectType() == ObjectType.STRING){
+            objectMap.put(node.getName(), node.getAsString());
+        }else if(node.getObjectType() == ObjectType.INT){
+            objectMap.put(node.getName(), node.getAsInt());
+        }else if(node.getObjectType() == ObjectType.LONG){
+            objectMap.put(node.getName(), node.getAsLong());
+        }else if(node.getObjectType() == ObjectType.DOUBLE){
+            objectMap.put(node.getName(), node.getAsDouble());
+        }else if(node.getObjectType() == ObjectType.BOOLEAN){
+            objectMap.put(node.getName(), node.getAsBoolean());
+        } else if (node.getObjectType() == ObjectType.BYTE) {
+            objectMap.put(node.getName(), node.getAsBytes());
+        }else if (node.getObjectType() == ObjectType.LIST){
+            objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Map<String, Object>>>(){}));
+        }
 
         return objectMap;
     }
@@ -763,4 +757,15 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         );
     }
 
+    private Class<?> resolveRawClass(Type type) {
+        if (type instanceof Class<?> clazz) {
+            return clazz;
+        }
+        if (type instanceof ParameterizedType pt) {
+            return (Class<?>) pt.getRawType();
+        }
+        throw new DecodeSerializationException(
+                "Unsupported Type: " + type
+        );
+    }
 }

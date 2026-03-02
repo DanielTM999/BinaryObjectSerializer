@@ -359,4 +359,29 @@ public class CustomerSerializationTest {
 
     }
 
+    @Test
+    void testMapOfListString() throws Exception {
+        Map<String, List<String>> map = new HashMap<>();
+        map.put("key1", new  ArrayList<>(){{
+            add("value1.1");
+            add("value1.2");
+            add("value1.3");
+        }});
+
+        map.put("key2", new  ArrayList<>(){{
+            add("value2.1");
+            add("value2.2");
+            add("value2.3");
+        }});
+
+
+
+        byte[] serialized = encoder.encodeToByteArray(map);
+
+        Map<String, Object> mapDecode = decoder.readAsTree(serialized).getAsMap();
+
+        assertEquals(map.size(), mapDecode.size());
+
+    }
+
 }
