@@ -215,14 +215,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     private <T> T convertTo(Class<T> clazz, BinaryObjectNode node){
         if(isSimpleType(clazz)){
-            throw new DecodeSerializationException(
-                    String.format(
-                            "Cannot convert node '%s' of type %s to %s. For simple types, use getAsString(), getAsInt(), getAsLong(), getAsBoolean(), getAsBytes() methods.",
-                            node.getName(),
-                            node.getObjectType(),
-                            clazz.getSimpleName()
-                    )
-            );
+            return convertSimpleType(clazz, node);
         }
 
         if(clazz.isArray()){
@@ -353,6 +346,52 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         });
 
         return objectMap;
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> T convertSimpleType(Class<T> clazz, BinaryObjectNode node) {
+
+        if (clazz == String.class) {
+            return (T) node.getAsString();
+        }
+
+        if (clazz == Boolean.class || clazz == boolean.class) {
+            Boolean v = node.getAsBoolean();
+            return (T) ((v != null) ? v : Boolean.FALSE);
+        }
+
+        if (clazz == Integer.class || clazz == int.class) {
+            Integer v = node.getAsInt();
+            return (T) ((v != null) ? v : Integer.valueOf(0));
+        }
+
+        if (clazz == Long.class || clazz == long.class) {
+            Long v = node.getAsLong();
+            return (T) ((v != null) ? v : Long.valueOf(0L));
+        }
+
+        if (clazz == Float.class || clazz == float.class) {
+            return (T) Float.valueOf(node.getAsFloat());
+        }
+
+        if (clazz == Double.class || clazz == double.class) {
+            return (T) Double.valueOf(node.getAsDouble());
+        }
+
+        if (clazz == Byte.class || clazz == byte.class) {
+            byte[] bytes = node.getAsBytes();
+            if (bytes == null || bytes.length != 1) {
+                throw new DecodeSerializationException(
+                        "Expected single byte but found " +
+                                (bytes == null ? "null" : bytes.length + " bytes")
+                );
+            }
+            return (T) Byte.valueOf(bytes[0]);
+        }
+
+        throw new DecodeSerializationException(
+                "Unsupported simple type: " + clazz.getName()
+        );
     }
 
     private void setFieldType(Object instance, Field field, String elementName, BinaryObjectNode node) throws IllegalAccessException {
