@@ -1,5 +1,6 @@
 package dtm.serialization.mapper.models;
 
+import dtm.serialization.BinaryObjectEncoder;
 import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.CollectionReference;
 import dtm.serialization.enums.ObjectType;
@@ -19,24 +20,13 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     private final List<BinaryObjectNode> children;
     private final BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction;
 
-    public DefaultBinaryObjectNode(BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction){
+    public DefaultBinaryObjectNode(
+            BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction
+    ){
         this.children = new ArrayList<>();
         this.convertAction = convertAction;
     }
 
-    public DefaultBinaryObjectNode(
-            ObjectType objectType,
-            String name,
-            byte[] bytesValue,
-            List<BinaryObjectNode> children,
-            BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction
-    ) {
-        this.objectType = objectType;
-        this.name = name;
-        this.bytesValue = bytesValue;
-        this.children = children;
-        this.convertAction = convertAction;
-    }
 
     @Override
     public ObjectType getObjectType() {
@@ -47,6 +37,7 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     public String getName() {
         return name;
     }
+
 
     @Override
     public List<BinaryObjectNode> getChildren() {
