@@ -296,6 +296,8 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     @SuppressWarnings("unchecked")
     private <E> Collection<E> convertToCollection(CollectionReference<?> ref, BinaryObjectNode node) {
+        if (node.getObjectType() == ObjectType.NULL) return null;
+
         Type type = ref.getType();
 
         if (!(type instanceof ParameterizedType pt)) {
