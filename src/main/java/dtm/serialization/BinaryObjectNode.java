@@ -2,9 +2,9 @@ package dtm.serialization;
 
 import dtm.serialization.enums.ObjectType;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 public interface BinaryObjectNode {
 
@@ -24,5 +24,6 @@ public interface BinaryObjectNode {
     float getAsFloat();
     double getAsDouble();
     <T> T getAsObject(Class<T> clazz);
-    <T extends Collection<?>> T getAsObject(CollectionReference<T> ref);
+    <T extends Collection<?>> T getAsCollection(CollectionReference<T> ref);
+    Map<String, Object> getAsMap();
 }

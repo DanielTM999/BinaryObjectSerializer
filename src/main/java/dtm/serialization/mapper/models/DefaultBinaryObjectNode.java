@@ -8,6 +8,7 @@ import dtm.serialization.exceptions.DecodeSerializationException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 public class DefaultBinaryObjectNode implements BinaryObjectNode {
@@ -170,12 +171,39 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     }
 
     @Override
-    public <T extends Collection<?>> T getAsObject(CollectionReference<T> ref) {
+    public <T extends Collection<?>> T getAsCollection(CollectionReference<T> ref) {
         try{
             return (T)convertAction.apply(ref, this);
         }catch (Exception e){
             throw new DecodeSerializationException(e);
         }
+    }
+
+    @Override
+    public Map<String, Object> getAsMap() {
+        Map<String, Object> objectMap = new ConcurrentHashMap<>();
+
+        for(BinaryObjectNode node : children){
+            if(node.getObjectType() == ObjectType.OBJECT){
+                objectMap.put(node.getName(), node.getAsMap());
+            }else if(node.getObjectType() == ObjectType.STRING){
+                objectMap.put(node.getName(), node.getAsString());
+            }else if(node.getObjectType() == ObjectType.INT){
+                objectMap.put(node.getName(), node.getAsInt());
+            }else if(node.getObjectType() == ObjectType.LONG){
+                objectMap.put(node.getName(), node.getAsLong());
+            }else if(node.getObjectType() == ObjectType.DOUBLE){
+                objectMap.put(node.getName(), node.getAsDouble());
+            }else if(node.getObjectType() == ObjectType.BOOLEAN){
+                objectMap.put(node.getName(), node.getAsBoolean());
+            } else if (node.getObjectType() == ObjectType.BYTE) {
+                objectMap.put(node.getName(), node.getAsBytes());
+            }else if (node.getObjectType() == ObjectType.LIST){
+                objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Map<String, Object>>>(){}));
+            }
+        }
+
+        return objectMap;
     }
 
     @Override

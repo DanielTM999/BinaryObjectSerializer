@@ -12,9 +12,7 @@ import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -41,7 +39,7 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
         ) {
             if(object == null) throw new EncodeSerializationException("object is null");
 
-            encode(payloadOut, object, "0");
+            encode(payloadOut, object, "root");
 
 
             byte[] payload = payloadBaos.toByteArray();
@@ -98,6 +96,8 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             writeInt(out, ai.get(), fieldName);
         }else if (value instanceof Character c) {
             writeString(out, String.valueOf(c), fieldName);
+        }else if(value instanceof Map<?,?> map){
+           writeMap(out, map, fieldName);
         }
 
         else{
@@ -302,6 +302,35 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             out.write(listData);
         }
 
+    }
+
+    private void writeMap(DataOutputStream out, Map<?, ?> map, String fieldName) throws IOException {
+        if(map == null) {
+            writeNull(out, fieldName);
+        }
+
+        byte[] nameBytes = fieldName.getBytes(StandardCharsets.UTF_8);
+
+        out.write(ObjectType.LIST.id());
+
+        out.writeInt(nameBytes.length);
+        out.write(nameBytes);
+
+        try (
+                ByteArrayOutputStream headerBaos = new ByteArrayOutputStream();
+                DataOutputStream headerOut = new DataOutputStream(headerBaos);
+        ) {
+
+            int i = 0;
+            for (Map.Entry<?,?> entry : map.entrySet()){
+                encode(headerOut, entry.getValue(), Objects.toString(entry.getKey(), String.valueOf(i)));
+                i++;
+            }
+
+            byte[] listData = headerBaos.toByteArray();
+            out.writeInt(listData.length);
+            out.write(listData);
+        }
     }
 
 }

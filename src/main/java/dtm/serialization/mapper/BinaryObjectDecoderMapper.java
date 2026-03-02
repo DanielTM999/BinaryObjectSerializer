@@ -18,6 +18,7 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -72,17 +73,17 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     @Override
     public <T extends Collection<?>> T readAsCollection(byte[] bytes, CollectionReference<T> ref) throws DecodeSerializationException {
-        return readAsTree(bytes).getAsObject(ref);
+        return readAsTree(bytes).getAsCollection(ref);
     }
 
     @Override
     public <T extends Collection<?>> T readAsCollection(File file, CollectionReference<T> ref) throws DecodeSerializationException {
-        return readAsTree(file).getAsObject(ref);
+        return readAsTree(file).getAsCollection(ref);
     }
 
     @Override
     public <T extends Collection<?>> T readAsCollection(InputStream stream, CollectionReference<T> ref) throws DecodeSerializationException {
-        return  readAsTree(stream).getAsObject(ref);
+        return  readAsTree(stream).getAsCollection(ref);
     }
 
     private void validSignedByte(DataInputStream in) throws IOException {
@@ -217,7 +218,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
 
         if(clazz.isArray()){
-            return clazz.cast(createArrayFromNode(clazz, "0", node));
+            return clazz.cast(createArrayFromNode(clazz, "root", node));
         }
 
         if(Collection.class.isAssignableFrom(clazz)){
@@ -230,6 +231,10 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                             clazz.getSimpleName()
                     )
             );
+        }
+
+        if (Map.class.isAssignableFrom(clazz)) {
+            return clazz.cast(convertToMap(node));
         }
 
         T instance = createInstanceOf(clazz);
@@ -316,6 +321,31 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         return collection;
     }
 
+    private Map<String, Object> convertToMap(BinaryObjectNode node){
+        Map<String, Object> objectMap = new ConcurrentHashMap<>();
+
+        node.getChildren().forEach(child -> {
+            if(node.getObjectType() == ObjectType.OBJECT){
+                objectMap.put(node.getName(), node.getAsMap());
+            }else if(node.getObjectType() == ObjectType.STRING){
+                objectMap.put(node.getName(), node.getAsString());
+            }else if(node.getObjectType() == ObjectType.INT){
+                objectMap.put(node.getName(), node.getAsInt());
+            }else if(node.getObjectType() == ObjectType.LONG){
+                objectMap.put(node.getName(), node.getAsLong());
+            }else if(node.getObjectType() == ObjectType.DOUBLE){
+                objectMap.put(node.getName(), node.getAsDouble());
+            }else if(node.getObjectType() == ObjectType.BOOLEAN){
+                objectMap.put(node.getName(), node.getAsBoolean());
+            } else if (node.getObjectType() == ObjectType.BYTE) {
+                objectMap.put(node.getName(), node.getAsBytes());
+            }else if (node.getObjectType() == ObjectType.LIST){
+                objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Map<String, Object>>>(){}));
+            }
+        });
+
+        return objectMap;
+    }
 
     private void setFieldType(Object instance, Field field, String elementName, BinaryObjectNode node) throws IllegalAccessException {
         Class<?> fieldType = field.getType();

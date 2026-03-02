@@ -300,7 +300,7 @@ public class CustomerSerializationTest {
 
         byte[] serialized = encoder.encodeToByteArray(strings);
 
-        List<String> deserialized = decoder.readAsTree(serialized).getAsObject(new CollectionReference<List<String>>(){});
+        List<String> deserialized = decoder.readAsTree(serialized).getAsCollection(new CollectionReference<List<String>>(){});
 
         byte[] reSerialized = encoder.encodeToByteArray(deserialized);
         assertArrayEquals(serialized, reSerialized, "O array de String serializado deve ser consistente");
@@ -316,9 +316,30 @@ public class CustomerSerializationTest {
 
         byte[] serialized = encoder.encodeToByteArray(enums);
 
-        List<TesteEnum> deserialized = decoder.readAsTree(serialized).getAsObject(new CollectionReference<List<TesteEnum>>(){});
+        List<TesteEnum> deserialized = decoder.readAsTree(serialized).getAsCollection(new CollectionReference<List<TesteEnum>>(){});
 
         byte[] reSerialized = encoder.encodeToByteArray(deserialized);
         assertArrayEquals(serialized, reSerialized, "O array de TesteEnum serializado deve ser consistente");
     }
+
+    @Test
+    void testMapStringString() throws Exception {
+        Map<String, String> map = new HashMap<>();
+        map.put("key1", "value1");
+        map.put("key2", "value2");
+
+        byte[] serialized = encoder.encodeToByteArray(map);
+
+        Map<String, Object> mapDecode = decoder.readAsTree(serialized).getAsMap();
+
+        assertEquals(map.size(), mapDecode.size());
+
+        map.forEach((key, value) -> {
+            assertTrue(mapDecode.containsKey(key), "Chave ausente: " + key);
+            assertEquals(value, mapDecode.get(key),
+                    "Valor diferente para chave: " + key);
+        });
+    }
+
+
 }
