@@ -341,5 +341,22 @@ public class CustomerSerializationTest {
         });
     }
 
+    @Test
+    void testMapOfMapString() throws Exception {
+        Map<String, Object> map = new HashMap<>();
+        map.put("key1", new HashMap<>(){{
+            put("key1.2", "value1.2");
+        }});
+        map.put("key2", new  HashMap<>(){{
+            put("key2.2", "value2.2");
+        }});
+
+        byte[] serialized = encoder.encodeToByteArray(map);
+
+        Map<String, Object> mapDecode = decoder.readAsTree(serialized).getAsMap();
+
+        assertEquals(map.size(), mapDecode.size());
+
+    }
 
 }

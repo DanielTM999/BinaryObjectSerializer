@@ -315,7 +315,7 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
 
         byte[] nameBytes = fieldName.getBytes(StandardCharsets.UTF_8);
 
-        out.write(ObjectType.LIST.id());
+        out.write(ObjectType.OBJECT.id());
 
         out.writeInt(nameBytes.length);
         out.write(nameBytes);
