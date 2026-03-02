@@ -26,4 +26,5 @@ public interface BinaryObjectNode {
     <T> T getAsObject(Class<T> clazz);
     <T extends Collection<?>> T getAsCollection(CollectionReference<T> ref);
     Map<String, Object> getAsMap();
+    Map<String, byte[]> getAsByteMap();
 }

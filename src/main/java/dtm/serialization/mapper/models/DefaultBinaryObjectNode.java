@@ -207,6 +207,16 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     }
 
     @Override
+    public Map<String, byte[]> getAsByteMap() {
+        Map<String, byte[]> objectMap = new ConcurrentHashMap<>();
+
+        for(BinaryObjectNode node : children){
+            objectMap.put(node.getName(), node.getAsBytes());
+        }
+        return objectMap;
+    }
+
+    @Override
     public String toString() {
         return toString(0);
     }
