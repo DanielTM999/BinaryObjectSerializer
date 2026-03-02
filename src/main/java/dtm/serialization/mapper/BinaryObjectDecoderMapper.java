@@ -48,6 +48,14 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             validVersion(metadataIn);
             try(DataInputStream payloadIn = readPayload(metadataIn)){
                 readNode(payloadIn, rootNode);
+
+                if (payloadIn.available() > 0) {
+                    throw new DecodeSerializationException(
+                            "Invalid serialization: extra bytes remaining after root node (" +
+                                    payloadIn.available() + " bytes)"
+                    );
+                }
+
                 return rootNode;
             }
         } catch (IOException e) {
