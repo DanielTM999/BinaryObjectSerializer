@@ -1,6 +1,7 @@
 package dtm.serialization.mapper;
 
 import dtm.serialization.BinaryObjectEncoder;
+import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
@@ -98,6 +99,8 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             writeString(out, String.valueOf(c), fieldName);
         }else if(value instanceof Map<?,?> map){
            writeMap(out, map, fieldName);
+        }else if(value instanceof BinaryObjectNode node){
+            writeBinaryObjectNode(out, node, fieldName);
         }
 
         else{
@@ -307,6 +310,7 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
     private void writeMap(DataOutputStream out, Map<?, ?> map, String fieldName) throws IOException {
         if(map == null) {
             writeNull(out, fieldName);
+            return;
         }
 
         byte[] nameBytes = fieldName.getBytes(StandardCharsets.UTF_8);
@@ -333,4 +337,25 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
         }
     }
 
+    private void writeBinaryObjectNode(DataOutputStream out, BinaryObjectNode node, String fieldName) throws IOException {
+        if(
+                node == null ||
+                node.getAsBytes().length == 0 ||
+                node.getObjectType() == null
+        ) {
+            writeNull(out, fieldName);
+            return;
+        }
+
+        byte[] nameBytes = fieldName.getBytes(StandardCharsets.UTF_8);
+        byte[] dataBytes = node.getAsBytes();
+
+        out.write(node.getObjectType().id());
+
+        out.writeInt(nameBytes.length);
+        out.write(nameBytes);
+
+        out.writeInt(dataBytes.length);
+        out.write(dataBytes);
+    }
 }

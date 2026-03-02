@@ -221,7 +221,7 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     }
 
     public void setBytesValue(byte[] bytesValue) {
-        this.bytesValue = bytesValue;
+        this.bytesValue = (bytesValue != null) ? bytesValue : new byte[0];
     }
 
     public void addChild(BinaryObjectNode  child) {
