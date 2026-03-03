@@ -216,7 +216,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     private Object convertTo(Class<?> clazz, BinaryObjectNode node){
 
 
-        if(clazz == Object.class){
+        if(clazz.equals(Object.class)){
             if(node.getObjectType() == ObjectType.NULL) return null;
 
             clazz = switch (node.getObjectType()){
@@ -364,34 +364,34 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @SuppressWarnings("unchecked")
     private <T> T convertSimpleType(Class<T> clazz, BinaryObjectNode node) {
 
-        if (clazz == String.class) {
+        if (clazz.equals(String.class)) {
             return (T) node.getAsString();
         }
 
-        if (clazz == Boolean.class || clazz == boolean.class) {
+        if (clazz.equals(Boolean.class) || clazz.equals(boolean.class)) {
             Boolean v = node.getAsBoolean();
             return (T) ((v != null) ? v : Boolean.FALSE);
         }
 
-        if (clazz == Integer.class || clazz == int.class) {
+        if (clazz.equals(Integer.class) || clazz.equals(int.class)) {
             Integer v = node.getAsInt();
             return (T) ((v != null) ? v : Integer.valueOf(0));
         }
 
-        if (clazz == Long.class || clazz == long.class) {
+        if (clazz.equals(Long.class) || clazz.equals(long.class)) {
             Long v = node.getAsLong();
             return (T) ((v != null) ? v : Long.valueOf(0L));
         }
 
-        if (clazz == Float.class || clazz == float.class) {
+        if (clazz.equals(Float.class) || clazz.equals(float.class)) {
             return (T) Float.valueOf(node.getAsFloat());
         }
 
-        if (clazz == Double.class || clazz == double.class) {
+        if (clazz.equals(Double.class) || clazz.equals(double.class)) {
             return (T) Double.valueOf(node.getAsDouble());
         }
 
-        if (clazz == Byte.class || clazz == byte.class) {
+        if (clazz.equals(Byte.class) || clazz.equals(byte.class)) {
             byte[] bytes = node.getAsBytes();
             if (bytes == null || bytes.length != 1) {
                 throw new DecodeSerializationException(
@@ -628,14 +628,14 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
         if (nodeType == ObjectType.NULL) {
             if (fieldType.isPrimitive()) {
-                if (fieldType == boolean.class) return false;
-                if (fieldType == byte.class) return (byte) 0;
-                if (fieldType == short.class) return (short) 0;
-                if (fieldType == int.class) return 0;
-                if (fieldType == long.class) return 0L;
-                if (fieldType == float.class) return 0f;
-                if (fieldType == double.class) return 0d;
-                if (fieldType == char.class) return '\0';
+                if (fieldType.equals(boolean.class)) return false;
+                if (fieldType.equals(byte.class)) return (byte) 0;
+                if (fieldType.equals(short.class)) return (short) 0;
+                if (fieldType.equals(int.class)) return 0;
+                if (fieldType.equals(long.class)) return 0L;
+                if (fieldType.equals(float.class)) return 0f;
+                if (fieldType.equals(double.class)) return 0d;
+                if (fieldType.equals(char.class)) return '\0';
 
                 throw new DecodeSerializationException(
                         String.format("Field '%s' has primitive type '%s' but node is NULL", elementName, fieldType.getName())
