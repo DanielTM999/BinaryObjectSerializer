@@ -333,7 +333,16 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             } else {
                 value = (E) convertTo(clazz, childNode);
                 if(clazz == Object.class && value instanceof Map<?,?> m){
-                    value = (E) new ArrayList<>(m.values());;
+                    if (!m.isEmpty()) {
+                        Object firstValue = m.values().iterator().next();
+                        if (firstValue instanceof Map) {
+                            value = (E) new ConcurrentHashMap<>((Map<?, ?>) firstValue);
+                        } else {
+                            value = (E) firstValue;
+                        }
+                    } else {
+                        value = (E) new ConcurrentHashMap<>();
+                    }
                 }
             }
             collection.add(value);

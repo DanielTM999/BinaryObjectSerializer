@@ -418,7 +418,7 @@ public class CustomerSerializationTest {
         Map<String, Object> mapDecode = decoder.readAsTree(serialized).getAsMap();
 
 
-
+        assertNotNull(mapDecode);
 
     }
 }
