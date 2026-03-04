@@ -155,6 +155,26 @@ public class CustomerSerializationTest {
         ENUM_3
     }
 
+    public static class PluginsFeedViewModel {
+        public String title;
+        public String url;
+        public PluginsFeedType feedType;
+
+        public PluginsFeedViewModel(){}
+
+        public PluginsFeedViewModel(String title, String url, PluginsFeedType feedType) {
+            this.title = title;
+            this.url = url;
+            this.feedType = feedType;
+        }
+
+        public enum PluginsFeedType {
+            FEED,
+            LOCAL
+        }
+    }
+
+
 
     private static BinaryObjectEncoderMapper encoder;
     private static BinaryObjectDecoderMapper decoder;
@@ -384,4 +404,21 @@ public class CustomerSerializationTest {
 
     }
 
+
+    @Test
+    void PluginsFeedViewModelMap() throws Exception {
+        Map<String, Object> source = new HashMap<>(){{
+            put("feeds", new ArrayList<>(){{
+                add(new PluginsFeedViewModel("teste", "testeUrl", PluginsFeedViewModel.PluginsFeedType.FEED));
+            }});
+        }};
+
+        byte[] serialized = encoder.encodeToByteArray(source);
+
+        Map<String, Object> mapDecode = decoder.readAsTree(serialized).getAsMap();
+
+
+
+
+    }
 }

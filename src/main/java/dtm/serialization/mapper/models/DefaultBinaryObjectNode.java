@@ -237,6 +237,10 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
         this.children.add(child);
     }
 
+    public void addAllChilds(Collection<BinaryObjectNode> childs) {
+        this.children.addAll(childs);
+    }
+
 
     private String toString(int indent) {
         StringBuilder sb = new StringBuilder();

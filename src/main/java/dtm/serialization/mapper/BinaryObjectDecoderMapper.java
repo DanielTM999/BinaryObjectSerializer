@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -190,6 +191,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                 }
             }
 
+
             default -> throw new DecodeSerializationException(
                     "Unsupported object type in body: " + rootNode.getObjectType()
             );
@@ -330,6 +332,9 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                 value = (E) getValueOnSimpleObject(clazz, "", childNode);
             } else {
                 value = (E) convertTo(clazz, childNode);
+                if(clazz == Object.class && value instanceof Map<?,?> m){
+                    value = (E) new ArrayList<>(m.values());;
+                }
             }
             collection.add(value);
         }
