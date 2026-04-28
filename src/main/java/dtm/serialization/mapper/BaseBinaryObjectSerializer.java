@@ -8,12 +8,14 @@ import dtm.serialization.exceptions.SerializationException;
 import dtm.serialization.extension.SerializationModule;
 
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public abstract class BaseBinaryObjectSerializer {
 
     private static final Map<FieldCacheKey, List<FieldCacheProps>> FIELD_CACHE = new ConcurrentHashMap<>();
+    private static final Map<FieldCacheKey, Map<String, FieldCacheProps>> FIELD_MAP_CACHE = new ConcurrentHashMap<>();
 
     private final Set<SerializationModule> serializationModules = ConcurrentHashMap.newKeySet();
     private final Map<Class<?>, SerializationModule> moduleCache = new ConcurrentHashMap<>();
@@ -42,6 +44,20 @@ public abstract class BaseBinaryObjectSerializer {
                     e
             );
         }
+    }
+
+    protected Map<String, FieldCacheProps> resolveFieldMap(Class<?> type, SerializationType serializationType) {
+        if (isSimpleType(type)) return Map.of();
+
+        FieldCacheKey key = new FieldCacheKey(type, serializationType);
+        return FIELD_MAP_CACHE.computeIfAbsent(key, k -> {
+            List<FieldCacheProps> fields = resolveFields(k.type(), k.serializationType());
+            Map<String, FieldCacheProps> map = new HashMap<>(fields.size() * 2);
+            for (FieldCacheProps field : fields) {
+                map.put(field.elementName(), field);
+            }
+            return map;
+        });
     }
 
     protected List<FieldCacheProps> extractFields(Class<?> type, SerializationType serializationType) {
@@ -98,11 +114,15 @@ public abstract class BaseBinaryObjectSerializer {
         while (current != Object.class) {
             for (Field field : current.getDeclaredFields()) {
                 field.setAccessible(true);
+                String elementName = getNameByElement(field);
                 fields.add(new FieldCacheProps(
                         current,
                         phase,
                         field,
-                        getNameByElement(field)
+                        field.getType(),
+                        field.getGenericType(),
+                        elementName,
+                        elementName.getBytes(StandardCharsets.UTF_8)
                 ));
             }
 
@@ -145,5 +165,13 @@ public abstract class BaseBinaryObjectSerializer {
 
     record FieldCacheKey(Class<?> type, SerializationType serializationType) {}
 
-    protected record FieldCacheProps(Class<?> type, SerializationType serializationType, Field field, String elementName){}
+    protected record FieldCacheProps(
+            Class<?> type,
+            SerializationType serializationType,
+            Field field,
+            Class<?> fieldType,
+            java.lang.reflect.Type genericType,
+            String elementName,
+            byte[] elementNameBytes
+    ) {}
 }

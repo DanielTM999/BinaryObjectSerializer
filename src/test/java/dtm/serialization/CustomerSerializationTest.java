@@ -202,6 +202,19 @@ public class CustomerSerializationTest {
     }
 
     @Test
+    public void testNormalCustomerDirectReadAsObject() throws Exception {
+        Address addr = new Address("SÃ£o Paulo", 12345, new int[]{101, 102});
+        Product p1 = new Product("Notebook", 3500.75, 2, Set.of("eletrÃ´nicos","computador"));
+        Product p2 = new Product("Smartphone", 1999.90, 1, Set.of("eletrÃ´nicos","celular"));
+        Customer customer = new Customer("tech_guy", List.of(p1,p2), addr);
+
+        byte[] encoded = encoder.encodeToByteArray(customer);
+        Customer decoded = decoder.readAsObject(encoded, Customer.class);
+
+        assertEquals(customer, decoded);
+    }
+
+    @Test
     public void testEmptyCart() throws Exception {
         Address addr = new Address("Curitiba", 80010, new int[]{});
         Customer customer = new Customer("empty_cart", new ArrayList<>(), addr);
