@@ -1,6 +1,7 @@
 package dtm.serialization.mapper;
 
 import dtm.serialization.annotations.ElementRef;
+import dtm.serialization.annotations.IgnoreElement;
 import dtm.serialization.annotations.IgnoreSuperClass;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
@@ -113,6 +114,10 @@ public abstract class BaseBinaryObjectSerializer {
 
         while (current != Object.class) {
             for (Field field : current.getDeclaredFields()) {
+                if (shouldIgnoreField(field, phase)) {
+                    continue;
+                }
+
                 field.setAccessible(true);
                 String elementName = getNameByElement(field);
                 fields.add(new FieldCacheProps(
@@ -161,6 +166,11 @@ public abstract class BaseBinaryObjectSerializer {
         }
 
         return field.getName();
+    }
+
+    private boolean shouldIgnoreField(Field field, SerializationType phase) {
+        IgnoreElement ignoreElement = field.getAnnotation(IgnoreElement.class);
+        return ignoreElement != null && Arrays.asList(ignoreElement.value()).contains(phase);
     }
 
     record FieldCacheKey(Class<?> type, SerializationType serializationType) {}

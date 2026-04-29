@@ -1,5 +1,8 @@
 package dtm.serialization;
 
+import dtm.serialization.annotations.ElementRef;
+import dtm.serialization.annotations.IgnoreElement;
+import dtm.serialization.enums.SerializationType;
 import dtm.serialization.mapper.BinaryObjectDecoderMapper;
 import dtm.serialization.mapper.BinaryObjectEncoderMapper;
 import org.junit.jupiter.api.BeforeAll;
@@ -174,6 +177,53 @@ public class CustomerSerializationTest {
         }
     }
 
+    public static class ElementRefSource {
+        @ElementRef("external_name")
+        public String name;
+        public int quantity;
+
+        public ElementRefSource() {}
+        public ElementRefSource(String name, int quantity) {
+            this.name = name;
+            this.quantity = quantity;
+        }
+    }
+
+    public static class ElementRefTarget {
+        @ElementRef("external_name")
+        public String renamed;
+        public int quantity;
+    }
+
+    public static class EncoderIgnoreModel {
+        public String visible;
+        @IgnoreElement
+        public String secret;
+
+        public EncoderIgnoreModel() {}
+        public EncoderIgnoreModel(String visible, String secret) {
+            this.visible = visible;
+            this.secret = secret;
+        }
+    }
+
+    public static class DecoderIgnoreSource {
+        public String visible;
+        public String ignored;
+
+        public DecoderIgnoreSource() {}
+        public DecoderIgnoreSource(String visible, String ignored) {
+            this.visible = visible;
+            this.ignored = ignored;
+        }
+    }
+
+    public static class DecoderIgnoreTarget {
+        public String visible;
+        @IgnoreElement(SerializationType.DECODE)
+        public String ignored = "default";
+    }
+
 
 
     private static BinaryObjectEncoderMapper encoder;
@@ -188,6 +238,42 @@ public class CustomerSerializationTest {
     private Customer serializeAndDeserialize(Customer customer) throws Exception {
         byte[] encoded = encoder.encodeToByteArray(customer);
         return decoder.readAsTree(encoded).getAsObject(Customer.class);
+    }
+
+    @Test
+    void testElementRefOnDecoder() throws Exception {
+        byte[] serialized = encoder.encodeToByteArray(new ElementRefSource("mapped", 7));
+
+        ElementRefTarget direct = decoder.readAsObject(serialized, ElementRefTarget.class);
+        ElementRefTarget fromTree = decoder.readAsTree(serialized).getAsObject(ElementRefTarget.class);
+
+        assertEquals("mapped", direct.renamed);
+        assertEquals(7, direct.quantity);
+        assertEquals("mapped", fromTree.renamed);
+        assertEquals(7, fromTree.quantity);
+    }
+
+    @Test
+    void testIgnoreElementOnEncoder() throws Exception {
+        byte[] serialized = encoder.encodeToByteArray(new EncoderIgnoreModel("public", "private"));
+
+        BinaryObjectNode tree = decoder.readAsTree(serialized);
+
+        assertNotNull(tree.getChild("visible"));
+        assertNull(tree.getChild("secret"));
+    }
+
+    @Test
+    void testIgnoreElementOnDecoder() throws Exception {
+        byte[] serialized = encoder.encodeToByteArray(new DecoderIgnoreSource("public", "private"));
+
+        DecoderIgnoreTarget direct = decoder.readAsObject(serialized, DecoderIgnoreTarget.class);
+        DecoderIgnoreTarget fromTree = decoder.readAsTree(serialized).getAsObject(DecoderIgnoreTarget.class);
+
+        assertEquals("public", direct.visible);
+        assertEquals("default", direct.ignored);
+        assertEquals("public", fromTree.visible);
+        assertEquals("default", fromTree.ignored);
     }
 
     @Test
