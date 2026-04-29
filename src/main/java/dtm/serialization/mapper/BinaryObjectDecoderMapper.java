@@ -8,6 +8,7 @@ import dtm.serialization.enums.ObjectType;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.DecodeSerializationException;
 import dtm.serialization.exceptions.SerializationException;
+import dtm.serialization.exceptions.StreamEndException;
 import dtm.serialization.mapper.models.DefaultBinaryObjectNode;
 
 import java.io.*;
@@ -85,7 +86,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public BinaryObjectNode readAsTree(InputStream stream) throws DecodeSerializationException {
         try {
-            return readAsTree(stream.readAllBytes());
+            return readAsTree(readFrame(stream));
         } catch (IOException e) {
             throw new DecodeSerializationException("Failed to read stream", e);
         }
@@ -142,7 +143,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public <T> T readAsObject(InputStream stream, Class<T> ref) throws DecodeSerializationException {
         try {
-            return readAsObject(stream.readAllBytes(), ref);
+            return readAsObject(readFrame(stream), ref);
         } catch (IOException e) {
             throw new DecodeSerializationException("Failed to read stream", e);
         }
@@ -162,6 +163,91 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public <T extends Collection<?>> T readAsCollection(InputStream stream, CollectionReference<T> ref) throws DecodeSerializationException {
         return  readAsTree(stream).getAsCollection(ref);
+    }
+
+    private byte[] readFrame(InputStream stream) throws IOException {
+        int validator = stream.read();
+        if (validator == -1) {
+            throw new StreamEndException("Stream ended before validator byte");
+        }
+        if ((byte) validator != (byte) Constants.VALIDATOR_BYTE) {
+            throw new StreamEndException(
+                    String.format("Invalid protocol: missing validator byte 0xAA (got 0x%02X)", validator)
+            );
+        }
+
+        int version = stream.read();
+        if (version == -1) {
+            throw new StreamEndException("Stream ended before version byte");
+        }
+        if ((byte) version != Constants.VERSION_BYTE && (byte) version != Constants.LEGACY_VERSION_BYTE) {
+            throw new StreamEndException("Unsupported protocol version: " + version);
+        }
+
+        ByteArrayOutputStream header = new ByteArrayOutputStream(16);
+        header.write(validator);
+        header.write(version);
+
+        long payloadLength;
+        if ((byte) version == Constants.VERSION_BYTE) {
+            payloadLength = readVarLongFromStream(stream, header);
+        } else {
+            byte[] lenBytes = readExactly(stream, 8);
+            header.write(lenBytes, 0, 8);
+            payloadLength = ((long) (lenBytes[0] & 0xFF) << 56)
+                    | ((long) (lenBytes[1] & 0xFF) << 48)
+                    | ((long) (lenBytes[2] & 0xFF) << 40)
+                    | ((long) (lenBytes[3] & 0xFF) << 32)
+                    | ((long) (lenBytes[4] & 0xFF) << 24)
+                    | ((long) (lenBytes[5] & 0xFF) << 16)
+                    | ((long) (lenBytes[6] & 0xFF) << 8)
+                    | (long) (lenBytes[7] & 0xFF);
+        }
+
+        if (payloadLength < 0 || payloadLength > Integer.MAX_VALUE) {
+            throw new StreamEndException("Invalid payload size: " + payloadLength);
+        }
+
+        byte[] payload = readExactly(stream, (int) payloadLength);
+
+        byte[] headerBytes = header.toByteArray();
+        byte[] frame = new byte[headerBytes.length + payload.length];
+        System.arraycopy(headerBytes, 0, frame, 0, headerBytes.length);
+        System.arraycopy(payload, 0, frame, headerBytes.length, payload.length);
+        return frame;
+    }
+
+    private long readVarLongFromStream(InputStream stream, ByteArrayOutputStream sink) throws IOException {
+        long value = 0;
+        int shift = 0;
+        for (int i = 0; i < 10; i++) {
+            int b = stream.read();
+            if (b == -1) {
+                throw new StreamEndException("Stream ended in payload length varlong");
+            }
+            sink.write(b);
+            value |= (long) (b & 0x7F) << shift;
+            if ((b & 0x80) == 0) {
+                return value;
+            }
+            shift += 7;
+        }
+        throw new StreamEndException("Invalid varlong length");
+    }
+
+    private byte[] readExactly(InputStream stream, int n) throws IOException {
+        byte[] buf = new byte[n];
+        int read = 0;
+        while (read < n) {
+            int r = stream.read(buf, read, n - read);
+            if (r == -1) {
+                throw new StreamEndException(
+                        "Stream ended early: expected " + n + " bytes, got " + read
+                );
+            }
+            read += r;
+        }
+        return buf;
     }
 
     private void validSignedByte(BinaryInput in) {
