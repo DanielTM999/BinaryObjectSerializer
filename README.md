@@ -83,6 +83,8 @@ Campos que podem conter arquivos maiores que a memoria disponivel devem usar
 encode. O encoder e o decoder transferem o corpo em blocos de 64 KiB.
 
 ```java
+import dtm.serialization.StreamContent;
+
 public class Upload {
     public String name;
 
