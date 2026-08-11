@@ -37,6 +37,11 @@ public class StreamContent implements Closeable {
         return new StreamContent(length, source);
     }
 
+    /** Creates stream content with an explicit cleanup action. */
+    public static StreamContent of(long length, IOSupplier<InputStream> source, Closeable cleanup) {
+        return new StreamContent(length, source, cleanup);
+    }
+
     public static StreamContent from(Path path) throws IOException {
         Path normalized = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
         return new StreamContent(Files.size(normalized), () -> Files.newInputStream(normalized));

@@ -4,6 +4,7 @@ import dtm.serialization.BinaryObjectEncoder;
 import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.Constants;
 import dtm.serialization.StreamContent;
+import dtm.serialization.StreamLazy;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
@@ -87,8 +88,10 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
     private long measureValue(Object value, byte[] name, boolean allowLargeContent) {
         if (value == null) return headerSize(name);
         if (value instanceof StreamContent content) {
-            if (!allowLargeContent) {
-                throw new EncodeSerializationException("StreamContent fields must be annotated with @LargeContent");
+            if (!allowLargeContent && !(content instanceof StreamLazy)) {
+                throw new EncodeSerializationException(
+                        "StreamContent fields must be annotated with @LargeContent or use StreamLazy"
+                );
             }
             return variableSize(name, content.length());
         }
@@ -171,7 +174,11 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
     private void writeValue(StreamingOutput out, Object value, byte[] name, boolean allowLargeContent) throws IOException {
         if (value == null) { writeStreamingHeader(out, ObjectType.NULL, name); return; }
         if (value instanceof StreamContent content) {
-            if (!allowLargeContent) throw new EncodeSerializationException("StreamContent fields must be annotated with @LargeContent");
+            if (!allowLargeContent && !(content instanceof StreamLazy)) {
+                throw new EncodeSerializationException(
+                        "StreamContent fields must be annotated with @LargeContent or use StreamLazy"
+                );
+            }
             writeStreamingHeader(out, ObjectType.LARGE_CONTENT, name);
             out.writeVarLong(content.length());
             try (InputStream source = content.openStream()) { out.copyExactly(source, content.length()); }

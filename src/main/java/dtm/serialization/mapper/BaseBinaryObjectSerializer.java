@@ -5,6 +5,7 @@ import dtm.serialization.annotations.IgnoreElement;
 import dtm.serialization.annotations.IgnoreSuperClass;
 import dtm.serialization.annotations.LargeContent;
 import dtm.serialization.StreamContent;
+import dtm.serialization.StreamLazy;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
 import dtm.serialization.exceptions.SerializationException;
@@ -126,6 +127,12 @@ public abstract class BaseBinaryObjectSerializer {
                 if (largeContent && !StreamContent.class.isAssignableFrom(field.getType())) {
                     throw new SerializationException("@LargeContent field '" + field.getName()
                             + "' must have type " + StreamContent.class.getName() + " or a subclass");
+                }
+                if (!largeContent && StreamContent.class.isAssignableFrom(field.getType())
+                        && !StreamLazy.class.isAssignableFrom(field.getType())) {
+                    throw new SerializationException("StreamContent field '" + field.getName()
+                            + "' must be annotated with @LargeContent or declared as "
+                            + StreamLazy.class.getName());
                 }
                 fields.add(new FieldCacheProps(
                         current,

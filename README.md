@@ -142,6 +142,70 @@ resolver, o destino e o ciclo de vida do arquivo ficam sob controle da aplicacao
 Nos dois casos, a copia termina no limite declarado e o decoder continua
 normalmente pelos campos posteriores.
 
+Para conteudos menores que devem permanecer em memoria, declare o campo como
+`StreamLazy` sem `@LargeContent`. O mesmo descritor de streaming e usado no
+protocolo, mas o decoder armazena os bytes em memoria e `openStream()` devolve
+uma nova stream a cada chamada:
+
+```java
+public class Message {
+    public StreamLazy content;
+}
+
+Message message = new Message();
+message.content = StreamLazy.of(bytes);
+```
+
+`StreamLazy` esta sujeito ao limite de arrays da JVM e mantem todo o conteudo em
+memoria ate `close()` ou ate a instancia ser coletada. Se o campo tiver
+`@LargeContent`, o comportamento externo/temporario continua tendo prioridade.
+
+### Arvore sob demanda
+
+Ao ler um `BinaryObjectNode` de uma stream, e possivel decodificar o objeto de
+headers e deixar o corpo binario terminal ligado diretamente a stream original:
+
+```java
+DecodeOptions options = DecodeOptions.DEFAULT.withDeserializeOnDemand(true);
+BinaryObjectNode tree = mapper.readAsTreeWithOptions(input, options);
+
+BinaryObjectNode headers = tree.getChild("headers");
+BinaryObjectNode payload = tree.getChild("payload");
+
+ObjectType bodyType = payload.getObjectType();
+long bodyLength = payload.getBodyLength();
+```
+
+O tipo do descritor informa se o corpo recebido e `BYTES` ou `LARGE_CONTENT`.
+Nos dois casos ele pode ser consumido sem copia usando `openStream()`:
+
+```java
+try (tree; InputStream body = payload.openStream()) {
+    body.transferTo(destination);
+}
+```
+
+O corpo sob demanda e one-shot: `openStream()` pode ser chamado uma vez. O
+decoder para exatamente no inicio desse corpo, portanto ele precisa ser
+consumido ou fechado antes de ler o proximo frame da stream principal. Fechar o
+`BinaryObjectNode` raiz tambem descarta o restante do corpo e posiciona a origem
+no proximo frame.
+
+Como o protocolo intercala cada header com seu corpo, somente um `BYTES` ou
+`LARGE_CONTENT` que seja o ultimo descritor do frame pode permanecer lazy sem
+buffer ou arquivo temporario. Corpos anteriores sao consumidos normalmente para
+que o decoder consiga chegar aos headers seguintes. `getAsBytes()` materializa
+o corpo selecionado em memoria e continua limitado a `Integer.MAX_VALUE`;
+`openStream()` aceita tamanhos `long`.
+
+Nos objetos gerados por este encoder, os campos sao ordenados pelo nome do campo
+Java. Portanto, o campo usado como corpo streaming deve ficar por ultimo nessa
+ordem. No modo sob demanda, o corpo terminal e lido diretamente da origem e nao
+passa pelo `LargeContentResolver`.
+
+A opcao afeta apenas `readAsTree*`; `readAsObject*` e `readAsCollection*`
+continuam materializando o resultado completo.
+
 Por padrão, quando `getExecutorService()` retorna `null`, o decoder usa `ForkJoinPool.commonPool()` e nunca o encerra.
 
 Um executor fornecido pelo observer é encerrado depois do último callback por padrão. Para compartilhar o executor ou reutilizar o observer, sobrescreva `shouldAutoCloseExecutorService()` e retorne `false`.

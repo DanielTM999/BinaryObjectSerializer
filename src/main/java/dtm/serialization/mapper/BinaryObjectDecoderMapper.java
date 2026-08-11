@@ -46,7 +46,14 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public BinaryObjectNode readAsTreeWithOptions(byte[] bytes, DecodeOptions options) throws DecodeSerializationException {
         if (bytes == null) throw new DecodeSerializationException("bytes is null");
-        return readAsTreeWithOptions(new ByteArrayInputStream(bytes), options);
+        DecodeOptions actual = optionsFor(options);
+        ObservationContext observation = new ObservationContext(actual.observer());
+        try {
+            return readTree(new BinaryInput(bytes, observation, actual.largeContentResolver(),
+                    actual.deserializeOnDemand()), actual.deserializeOnDemand()).node();
+        } finally {
+            observation.close();
+        }
     }
 
     @Override
@@ -62,9 +69,13 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public BinaryObjectNode readAsTreeWithOptions(File file, DecodeOptions options) throws DecodeSerializationException {
         if (file == null) throw new DecodeSerializationException("file is null");
-        try (InputStream input = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
-            return readAsTreeWithOptions(input, options);
-        } catch (IOException e) { throw new DecodeSerializationException("Failed to read file", e); }
+        DecodeOptions actual = optionsFor(options);
+        try {
+            InputStream input = new BufferedInputStream(Files.newInputStream(file.toPath()));
+            return readTreeFromStream(input, actual, true);
+        } catch (IOException e) {
+            throw new DecodeSerializationException("Failed to read file", e);
+        }
     }
 
     @Override
@@ -80,21 +91,26 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     @Override
     public BinaryObjectNode readAsTreeWithOptions(InputStream stream, DecodeOptions options) throws DecodeSerializationException {
         if (stream == null) throw new DecodeSerializationException("stream is null");
-        DecodeOptions actual = options == null ? DecodeOptions.DEFAULT : options;
-        ObservationContext observation = new ObservationContext(actual.observer());
+        DecodeOptions actual = optionsFor(options);
+        return readTreeFromStream(stream, actual, false);
+    }
+
+    private BinaryObjectNode readTreeFromStream(InputStream stream, DecodeOptions options, boolean ownedSource) {
+        ObservationContext observation = new ObservationContext(options.observer());
+        BinaryInput input = new BinaryInput(stream, observation, options.largeContentResolver(),
+                options.deserializeOnDemand(), ownedSource);
+        boolean handedOff = false;
         try {
-            BinaryInput input = new BinaryInput(stream, observation, actual.largeContentResolver());
-            readProtocolHeader(input);
-            long payloadSize = input.readPayloadLength();
-            long payloadEnd = checkedEnd(input.position(), payloadSize, "payload");
-            input.beginPayload(payloadSize);
-            DefaultBinaryObjectNode root = new DefaultBinaryObjectNode(this::convertTo);
-            readNode(input, root, payloadEnd, new ArrayDeque<>());
-            requirePayloadEnd(input, payloadEnd);
-            return root;
+            TreeReadResult result = readTree(input, options.deserializeOnDemand());
+            handedOff = result.deferred();
+            if (ownedSource && !handedOff) input.closeOwnedSource();
+            return result.node();
         } catch (DecodeSerializationException e) { throw e; }
         catch (RuntimeException e) { throw new DecodeSerializationException("Failed to read stream", e); }
-        finally { observation.close(); }
+        finally {
+            if (ownedSource && !handedOff) input.closeOwnedSourceQuietly();
+            observation.close();
+        }
     }
 
     @Override
@@ -229,6 +245,19 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         finally { observation.close(); }
     }
 
+    private TreeReadResult readTree(BinaryInput input, boolean deserializeOnDemand) {
+        readProtocolHeader(input);
+        long payloadSize = input.readPayloadLength();
+        long payloadEnd = checkedEnd(input.position(), payloadSize, "payload");
+        input.beginPayload(payloadSize);
+        DefaultBinaryObjectNode root = new DefaultBinaryObjectNode(this::convertTo);
+        boolean deferred = readNode(input, root, payloadEnd, new ArrayDeque<>(), deserializeOnDemand);
+        if (!deferred) requirePayloadEnd(input, payloadEnd);
+        return new TreeReadResult(root, deferred);
+    }
+
+    private record TreeReadResult(BinaryObjectNode node, boolean deferred) { }
+
     private DecodeOptions optionsFor(DecodeOptions options) {
         return options == null ? DecodeOptions.DEFAULT : options;
     }
@@ -267,15 +296,17 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         in.useVersion(version);
     }
 
-    private void readNode(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit, Deque<String> path) {
+    private boolean readNode(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit,
+                             Deque<String> path, boolean terminalAncestor) {
         long descriptorStart = input.position();
         readNodeMetadata(input, rootNode);
         input.descriptorStarted(rootNode.getName(), rootNode.getObjectType(), descriptorStart);
         boolean added = rootNode.getName() != null && !rootNode.getName().isEmpty() && !"root".equals(rootNode.getName());
         if (added) path.addLast(rootNode.getName());
-        readNodeBody(input, rootNode, payloadLimit, path);
+        boolean deferred = readNodeBody(input, rootNode, payloadLimit, path, terminalAncestor);
         if (added) path.removeLast();
         input.descriptorFinished(rootNode.getName(), rootNode.getObjectType(), descriptorStart);
+        return deferred;
     }
 
     private void readNodeMetadata(BinaryInput input, DefaultBinaryObjectNode rootNode) {
@@ -307,7 +338,8 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         rootNode.setName(input.readString(nameSize));
     }
 
-    private void readNodeBody(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit, Deque<String> path) {
+    private boolean readNodeBody(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit,
+                                 Deque<String> path, boolean terminalAncestor) {
         long bodySize = getBodySize(input, rootNode.getObjectType());
         if (bodySize < 0) throw new SerializationException("Invalid body size: " + bodySize);
 
@@ -319,21 +351,47 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             );
         }
 
+        boolean terminal = terminalAncestor && bodyEnd == payloadLimit;
+        boolean deferred = false;
+
         switch (rootNode.getObjectType()) {
             case STRING, I64, I32, I16, I8, BOOLEAN, DOUBLE, FLOAT, BYTES, NULL -> {
-                rootNode.setBytesValue(input.readBytes(toArrayLength(bodySize, rootNode.getObjectType().name())));
+                if (rootNode.getObjectType() == ObjectType.BYTES && bodySize > 0
+                        && terminal && input.deferTreeValues()) {
+                    rootNode.setDeferredBody(input.deferBody(bodySize, rootNode.getName(), rootNode.getObjectType()));
+                    deferred = true;
+                } else {
+                    int length = toArrayLength(bodySize, rootNode.getObjectType().name());
+                    if (input.canSliceTreeValues()) {
+                        rootNode.setBytesValue(input.sourceBytes(), input.sourceOffset(), length);
+                        input.skip(length);
+                    } else {
+                        rootNode.setBytesValue(input.readBytes(length));
+                    }
+                }
             }
             case LARGE_CONTENT -> {
-                rootNode.setStreamContent(readLargeContent(input, rootNode.getName(), bodySize,
-                        null, StreamContent.class, path));
+                if (bodySize > 0 && terminal && input.deferTreeValues()) {
+                    rootNode.setStreamContent(input.deferBody(bodySize, rootNode.getName(), rootNode.getObjectType()));
+                    deferred = true;
+                } else if (terminal && input.deferTreeValues()) {
+                    rootNode.setStreamContent(StreamLazy.wrap(new byte[0]));
+                } else {
+                    rootNode.setStreamContent(readLargeContent(input, rootNode.getName(), bodySize,
+                            null, StreamContent.class, path, true));
+                }
             }
 
             case OBJECT, LIST -> {
                 rootNode.setBytesValue(new byte[0]);
                 while (input.position() < bodyEnd) {
                     DefaultBinaryObjectNode child = new DefaultBinaryObjectNode(this::convertTo);
-                    readNode(input, child, bodyEnd, path);
+                    boolean childDeferred = readNode(input, child, bodyEnd, path, terminal);
                     rootNode.addChild(child);
+                    if (childDeferred) {
+                        deferred = true;
+                        break;
+                    }
                 }
             }
 
@@ -342,11 +400,12 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             );
         }
 
-        if (input.position() != bodyEnd) {
+        if (!deferred && input.position() != bodyEnd) {
             throw new DecodeSerializationException(
                     "Invalid serialization: node body size mismatch for '" + rootNode.getName() + "'"
             );
         }
+        return deferred;
     }
 
     private Object readValue(BinaryInput input, Class<?> targetType, Type genericType, long payloadLimit, Deque<String> path) {
@@ -407,7 +466,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                         + "' contains large content but target type is " + targetType.getName());
             }
             StreamContent content = readLargeContent(input, header.name(), header.bodySize(),
-                    null, targetType, path);
+                    null, targetType, path, false);
             requireCompatibleStreamContent(targetType, content, header.name());
             return content;
         }
@@ -467,7 +526,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                                 + "' expected LARGE_CONTENT but found " + childHeader.objectType());
                     } else {
                         value = readLargeContent(input, childHeader.name(), childHeader.bodySize(),
-                                targetType, fieldCacheProps.fieldType(), path);
+                                targetType, fieldCacheProps.fieldType(), path, true);
                         requireCompatibleStreamContent(fieldCacheProps.fieldType(), (StreamContent) value, childHeader.name());
                         input.descriptorFinished(childHeader);
                     }
@@ -654,7 +713,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             case OBJECT -> readMapBody(input, header, Object.class, path);
             case NULL -> null;
             case LARGE_CONTENT -> readLargeContent(input, header.name(), header.bodySize(),
-                    null, StreamContent.class, path);
+                    null, StreamContent.class, path, true);
         };
     }
 
@@ -779,7 +838,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     private StreamContent readLargeContent(BinaryInput input, String name, long length,
                                            Class<?> ownerType, Class<?> targetContentType,
-                                           Deque<String> path) {
+                                           Deque<String> path, boolean externalByDefault) {
         LargeContentResolver resolver = input.largeContentResolver();
         LargeContentDestination destination = null;
         try {
@@ -787,6 +846,10 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                     && StreamContent.class.isAssignableFrom(targetContentType)
                     ? targetContentType.asSubclass(StreamContent.class)
                     : StreamContent.class;
+            if (resolver == null && !externalByDefault && concreteType == StreamLazy.class) {
+                int memoryLength = toArrayLength(length, "StreamLazy");
+                return StreamLazy.wrap(input.readLargeContentBytes(memoryLength, name, ObjectType.LARGE_CONTENT));
+            }
             destination = resolver == null
                     ? LargeContentDestination.temporary(concreteType)
                     : resolver.resolve(new LargeContentContext(List.copyOf(path), name, length, ownerType));
@@ -1743,17 +1806,44 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
     private static final class BinaryInput {
         private static final int BUFFER_SIZE = 64 * 1024;
         private final InputStream source;
+        private final byte[] sourceBytes;
         private final ObservationContext observation;
         private final LargeContentResolver largeContentResolver;
+        private final boolean deferTreeValues;
+        private final boolean closeSourceAfterDeferredBody;
         private long position;
         private boolean compactLengths;
         private boolean longBodyLengths;
 
         private BinaryInput(InputStream source, ObservationContext observation,
                             LargeContentResolver largeContentResolver) {
-            this.source = source;
+            this.source = Objects.requireNonNull(source, "source");
+            this.sourceBytes = null;
             this.observation = observation;
             this.largeContentResolver = largeContentResolver;
+            this.deferTreeValues = false;
+            this.closeSourceAfterDeferredBody = false;
+        }
+
+        private BinaryInput(InputStream source, ObservationContext observation,
+                            LargeContentResolver largeContentResolver, boolean deferTreeValues,
+                            boolean closeSourceAfterDeferredBody) {
+            this.source = Objects.requireNonNull(source, "source");
+            this.sourceBytes = null;
+            this.observation = observation;
+            this.largeContentResolver = largeContentResolver;
+            this.deferTreeValues = deferTreeValues;
+            this.closeSourceAfterDeferredBody = closeSourceAfterDeferredBody;
+        }
+
+        private BinaryInput(byte[] sourceBytes, ObservationContext observation,
+                            LargeContentResolver largeContentResolver, boolean deferTreeValues) {
+            this.source = null;
+            this.sourceBytes = Objects.requireNonNull(sourceBytes, "sourceBytes");
+            this.observation = observation;
+            this.largeContentResolver = largeContentResolver;
+            this.deferTreeValues = deferTreeValues;
+            this.closeSourceAfterDeferredBody = false;
         }
 
         private long position() {
@@ -1761,6 +1851,43 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
 
         private LargeContentResolver largeContentResolver() { return largeContentResolver; }
+
+        private boolean deferTreeValues() { return deferTreeValues; }
+
+        private boolean canSliceTreeValues() { return deferTreeValues && sourceBytes != null; }
+
+        private StreamContent deferBody(long length, String name, ObjectType type) {
+            DeferredBodyState state = new DeferredBodyState(this, length, name, type,
+                    closeSourceAfterDeferredBody);
+            return StreamContent.of(length, state::openStream, state);
+        }
+
+        private void closeOwnedSource() {
+            if (source == null) return;
+            try {
+                source.close();
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed to close decoder input", e);
+            }
+        }
+
+        private void closeOwnedSourceQuietly() {
+            if (source == null) return;
+            try { source.close(); }
+            catch (IOException ignored) { }
+        }
+
+        private byte[] sourceBytes() {
+            if (sourceBytes == null) throw new IllegalStateException("Input is not backed by a byte array");
+            return sourceBytes;
+        }
+
+        private int sourceOffset() {
+            if (sourceBytes == null || position > Integer.MAX_VALUE) {
+                throw new IllegalStateException("Input position is not an array offset");
+            }
+            return (int) position;
+        }
 
         private void beginPayload(long payloadSize) {
             observation.beginPayload(position, payloadSize);
@@ -1800,6 +1927,12 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
 
         private byte readByte() {
+            if (sourceBytes != null) {
+                if (position >= sourceBytes.length) {
+                    throw new StreamEndException("Unexpected end of input at byte " + position);
+                }
+                return sourceBytes[(int) position++];
+            }
             try {
                 int value = source.read();
                 if (value < 0) throw new StreamEndException("Unexpected end of input at byte " + position);
@@ -1874,7 +2007,36 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             return result;
         }
 
+        private byte[] readLargeContentBytes(int length, String name, ObjectType type) {
+            byte[] result = new byte[length];
+            int total = 0;
+            long descriptorStart = position;
+            try {
+                while (total < length) {
+                    int read = source.read(result, total, Math.min(BUFFER_SIZE, length - total));
+                    if (read < 0) throw new EOFException("Large content ended early: expected " + length
+                            + " bytes, got " + total);
+                    if (read == 0) continue;
+                    total += read;
+                    position += read;
+                    observation.descriptorProgress(name, type, descriptorStart, position);
+                }
+                return result;
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed reading large content at byte " + position, e);
+            }
+        }
+
         private void readInto(byte[] target, int offset, int length) {
+            if (sourceBytes != null) {
+                long end = position + length;
+                if (end > sourceBytes.length) {
+                    throw new StreamEndException("Unexpected end of input at byte " + position);
+                }
+                System.arraycopy(sourceBytes, (int) position, target, offset, length);
+                position = end;
+                return;
+            }
             int total = 0;
             try {
                 while (total < length) {
@@ -1893,6 +2055,11 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             if (length < 0) {
                 throw new DecodeSerializationException("Invalid skip length: " + length);
             }
+            if (sourceBytes != null) {
+                long end = checkedArrayEnd(position, length, sourceBytes.length);
+                position = end;
+                return;
+            }
             byte[] buffer = new byte[(int) Math.min(BUFFER_SIZE, Math.max(1L, length))];
             long remaining = length;
             while (remaining > 0) {
@@ -1910,7 +2077,17 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             while (remaining > 0) {
                 int chunk = (int) Math.min(buffer.length, remaining);
                 int read;
-                try { read = source.read(buffer, 0, chunk); }
+                try {
+                    if (sourceBytes != null) {
+                        if (position >= sourceBytes.length) read = -1;
+                        else {
+                            read = (int) Math.min(chunk, sourceBytes.length - position);
+                            System.arraycopy(sourceBytes, (int) position, buffer, 0, read);
+                        }
+                    } else {
+                        read = source.read(buffer, 0, chunk);
+                    }
+                }
                 catch (IOException e) { throw new IOException("Failed reading large content at byte " + position, e); }
                 if (read < 0) throw new EOFException("Large content ended early: expected " + length
                         + " bytes, got " + (length - remaining));
@@ -1919,6 +2096,116 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                 position += read;
                 remaining -= read;
                 observation.descriptorProgress(name, type, descriptorStart, position);
+            }
+        }
+
+        private int readDeferred(byte[] target, int offset, int length) throws IOException {
+            if (length == 0) return 0;
+            if (sourceBytes != null) {
+                if (position >= sourceBytes.length) return -1;
+                int read = (int) Math.min(length, sourceBytes.length - position);
+                System.arraycopy(sourceBytes, (int) position, target, offset, read);
+                position += read;
+                return read;
+            }
+            int read = source.read(target, offset, length);
+            if (read > 0) position += read;
+            return read;
+        }
+
+        private static long checkedArrayEnd(long start, long length, int arrayLength) {
+            long end;
+            try {
+                end = Math.addExact(start, length);
+            } catch (ArithmeticException e) {
+                throw new DecodeSerializationException("Input position overflow", e);
+            }
+            if (end > arrayLength) throw new StreamEndException("Unexpected end of input at byte " + start);
+            return end;
+        }
+
+        private static final class DeferredBodyState implements Closeable {
+            private final BinaryInput input;
+            private final String name;
+            private final ObjectType type;
+            private final boolean closeSource;
+            private long remaining;
+            private boolean opened;
+            private boolean closed;
+
+            private DeferredBodyState(BinaryInput input, long length, String name, ObjectType type,
+                                      boolean closeSource) {
+                if (length < 0) throw new IllegalArgumentException("length must be >= 0");
+                this.input = input;
+                this.remaining = length;
+                this.name = name;
+                this.type = type;
+                this.closeSource = closeSource;
+            }
+
+            private synchronized InputStream openStream() throws IOException {
+                if (closed) throw new IOException("Deferred body '" + name + "' is closed");
+                if (opened) throw new IOException("Deferred body '" + name + "' can only be opened once");
+                opened = true;
+                return new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                        byte[] single = new byte[1];
+                        int read = read(single, 0, 1);
+                        return read < 0 ? -1 : single[0] & 0xFF;
+                    }
+
+                    @Override
+                    public int read(byte[] buffer, int offset, int length) throws IOException {
+                        Objects.checkFromIndexSize(offset, length, buffer.length);
+                        return DeferredBodyState.this.read(buffer, offset, length);
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        DeferredBodyState.this.close();
+                    }
+                };
+            }
+
+            private synchronized int read(byte[] buffer, int offset, int length) throws IOException {
+                if (length == 0) return 0;
+                if (closed || remaining == 0) return -1;
+                int requested = (int) Math.min(Math.min(length, remaining), BUFFER_SIZE);
+                int read = input.readDeferred(buffer, offset, requested);
+                if (read < 0) {
+                    finish();
+                    throw new EOFException("Deferred " + type + " body '" + name
+                            + "' ended early with " + remaining + " bytes remaining");
+                }
+                if (read == 0) return 0;
+                remaining -= read;
+                if (remaining == 0) finish();
+                return read;
+            }
+
+            @Override
+            public synchronized void close() throws IOException {
+                if (closed) return;
+                byte[] buffer = new byte[(int) Math.min(BUFFER_SIZE, Math.max(1L, remaining))];
+                while (remaining > 0) {
+                    int requested = (int) Math.min(buffer.length, remaining);
+                    int read = input.readDeferred(buffer, 0, requested);
+                    if (read < 0) {
+                        finish();
+                        throw new EOFException("Deferred " + type + " body '" + name
+                                + "' ended early with " + remaining + " bytes remaining");
+                    }
+                    if (read == 0) continue;
+                    remaining -= read;
+                }
+                finish();
+            }
+
+            private void finish() throws IOException {
+                if (closed) return;
+                closed = true;
+                if (closeSource && input.source != null) input.source.close();
             }
         }
     }

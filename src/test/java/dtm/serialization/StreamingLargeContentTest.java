@@ -103,6 +103,68 @@ class StreamingLargeContentTest {
     }
 
     @Test
+    void keepsStreamLazyInMemoryWithoutLargeContentAnnotation() throws Exception {
+        byte[] content = patternedBytes(220_000);
+        LazyAttachment source = new LazyAttachment();
+        source.before = "before";
+        source.content = StreamLazy.of(content);
+        source.zAfterContent = "after";
+
+        byte[] encoded = new BinaryObjectEncoderMapper().encodeToByteArray(source);
+        LazyAttachment decoded = new BinaryObjectDecoderMapper().readAsObject(encoded, LazyAttachment.class);
+
+        assertEquals("before", decoded.before);
+        assertEquals("after", decoded.zAfterContent);
+        assertInstanceOf(StreamLazy.class, decoded.content);
+        try (InputStream first = decoded.content.openStream();
+             InputStream second = decoded.content.openStream()) {
+            assertArrayEquals(content, first.readAllBytes());
+            assertArrayEquals(content, second.readAllBytes());
+        }
+
+        decoded.content.close();
+        assertThrows(IOException.class, decoded.content::openStream);
+    }
+
+    @Test
+    void rejectsStreamLazyLargerThanAnInMemoryJavaArray() {
+        long declaredLength = (long) Integer.MAX_VALUE + 1L;
+        ByteArrayOutputStream frame = new ByteArrayOutputStream();
+        frame.write(Constants.VALIDATOR_BYTE);
+        frame.write(Constants.VERSION_BYTE);
+        long descriptorLength = 1L + 1L + 4L + varLongLength(declaredLength) + declaredLength;
+        writeVarLong(frame, descriptorLength);
+        frame.write(0x13);
+        frame.write(4);
+        frame.writeBytes("root".getBytes(StandardCharsets.UTF_8));
+        writeVarLong(frame, declaredLength);
+
+        DecodeSerializationException error = assertThrows(
+                DecodeSerializationException.class,
+                () -> new BinaryObjectDecoderMapper().readAsObject(
+                        new ByteArrayInputStream(frame.toByteArray()), StreamLazy.class)
+        );
+
+        assertTrue(error.getMessage().contains("too large for an in-memory Java value"));
+    }
+
+    @Test
+    void largeContentAnnotationKeepsExternalPolicyForStreamLazy() throws Exception {
+        byte[] content = patternedBytes(180_000);
+        LazyLargeAttachment source = new LazyLargeAttachment();
+        source.content = StreamLazy.of(content);
+
+        byte[] encoded = new BinaryObjectEncoderMapper().encodeToByteArray(source);
+        LazyLargeAttachment decoded = new BinaryObjectDecoderMapper().readAsObject(
+                encoded, LazyLargeAttachment.class
+        );
+
+        assertInstanceOf(StreamLazy.class, decoded.content);
+        assertArrayEquals(content, decoded.content.openStream().readAllBytes());
+        decoded.content.close();
+    }
+
+    @Test
     void handlesLongContentLengthWithoutAllocatingItsBody() throws Exception {
         long declaredLength = (long) Integer.MAX_VALUE + 1L;
         ByteArrayOutputStream frame = new ByteArrayOutputStream();
@@ -237,6 +299,17 @@ class StreamingLargeContentTest {
     public static class InvalidAttachment {
         @LargeContent
         public byte[] content = new byte[0];
+    }
+
+    public static class LazyAttachment {
+        public String before;
+        public StreamLazy content;
+        public String zAfterContent;
+    }
+
+    public static class LazyLargeAttachment {
+        @LargeContent
+        public StreamLazy content;
     }
 
     public static class CustomAttachment {

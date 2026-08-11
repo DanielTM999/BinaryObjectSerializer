@@ -6,6 +6,9 @@ import dtm.serialization.StreamContent;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.exceptions.DecodeSerializationException;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.BiFunction;
@@ -19,6 +22,7 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     private int sourceOffset;
     private int sourceLength;
     private StreamContent streamContent;
+    private StreamContent deferredBody;
     private final List<BinaryObjectNode> children;
     private Map<String, BinaryObjectNode> childrenByName;
     private final BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction;
@@ -39,6 +43,18 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     @Override
     public String getName() {
         return name;
+    }
+
+    @Override
+    public long getBodyLength() {
+        if (objectType == ObjectType.OBJECT || objectType == ObjectType.LIST) {
+            throw new DecodeSerializationException(
+                    String.format("Node '%s' is a container and has no leaf body length", name)
+            );
+        }
+        if (streamContent != null) return streamContent.length();
+        if (deferredBody != null) return deferredBody.length();
+        return valueLength();
     }
 
 
@@ -153,6 +169,20 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
             throw new DecodeSerializationException("Large content must be read with getAsStreamContent()");
         }
         return materializedBytes();
+    }
+
+    @Override
+    public InputStream openStream() throws IOException {
+        if (objectType == ObjectType.LARGE_CONTENT) {
+            return getAsStreamContent().openStream();
+        }
+        if (objectType == ObjectType.OBJECT || objectType == ObjectType.LIST || objectType == ObjectType.NULL) {
+            throw new DecodeSerializationException(
+                    String.format("Node '%s' has no streamable body: %s", name, objectType)
+            );
+        }
+        if (deferredBody != null) return deferredBody.openStream();
+        return new ByteArrayInputStream(valueSource(), valueOffset(), valueLength());
     }
 
     @Override
@@ -302,6 +332,14 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
         this.sourceBytes = null;
     }
 
+    public void setDeferredBody(StreamContent deferredBody) {
+        this.deferredBody = Objects.requireNonNull(deferredBody, "deferredBody");
+        this.bytesValue = null;
+        this.sourceBytes = null;
+        this.sourceOffset = 0;
+        this.sourceLength = 0;
+    }
+
     public void addChild(BinaryObjectNode  child) {
         this.children.add(child);
         if (childrenByName != null) {
@@ -405,6 +443,33 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     }
 
     private byte[] materializedBytes() {
+        if (deferredBody != null) {
+            long declaredLength = deferredBody.length();
+            if (declaredLength > Integer.MAX_VALUE) {
+                throw new DecodeSerializationException("Node '" + name
+                        + "' is too large for byte[]; use openStream()");
+            }
+            byte[] materialized = new byte[(int) declaredLength];
+            try (InputStream input = deferredBody.openStream()) {
+                int offset = 0;
+                while (offset < materialized.length) {
+                    int read = input.read(materialized, offset, materialized.length - offset);
+                    if (read < 0) throw new IOException("Deferred body ended early at byte " + offset);
+                    if (read == 0) continue;
+                    offset += read;
+                }
+                if (input.read() >= 0) throw new IOException("Deferred body exceeds its declared length");
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed to materialize node '" + name + "'", e);
+            }
+            try {
+                deferredBody.close();
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed to close node '" + name + "'", e);
+            }
+            deferredBody = null;
+            bytesValue = materialized;
+        }
         if (bytesValue == null) {
             bytesValue = sourceBytes == null
                     ? new byte[0]
@@ -414,6 +479,30 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
             sourceLength = 0;
         }
         return bytesValue;
+    }
+
+    @Override
+    public void close() throws IOException {
+        IOException failure = null;
+        if (deferredBody != null) {
+            try { deferredBody.close(); }
+            catch (IOException e) { failure = e; }
+        }
+        if (streamContent != null) {
+            try { streamContent.close(); }
+            catch (IOException e) {
+                if (failure == null) failure = e;
+                else failure.addSuppressed(e);
+            }
+        }
+        for (BinaryObjectNode child : children) {
+            try { child.close(); }
+            catch (IOException e) {
+                if (failure == null) failure = e;
+                else failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) throw failure;
     }
 
     private boolean bytesValueIsContainer() {
