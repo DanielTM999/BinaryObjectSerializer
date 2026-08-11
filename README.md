@@ -101,6 +101,19 @@ try (OutputStream network = socket.getOutputStream()) {
 }
 ```
 
+Quando a API consumidora exige uma `InputStream`, use `encodeToStream()`. A
+codificacao comeca na primeira leitura, usa um pipe com backpressure e buffer de
+64 KiB, e nao materializa o frame completo em memoria:
+
+```java
+try (InputStream encoded = mapper.encodeToStream(upload)) {
+    send(encoded);
+}
+```
+
+Falhas que acontecerem durante a producao do frame sao entregues como
+`IOException` durante a leitura da stream retornada.
+
 No decode, um resolver escolhe o destino de cada campo grande. O valor gravado
 e reabrivel pelo `StreamContent` atribuido ao objeto:
 

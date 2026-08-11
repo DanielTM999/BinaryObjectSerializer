@@ -14,6 +14,8 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -23,11 +25,14 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implements BinaryObjectEncoder {
 
     private static final byte[] ROOT_NAME_BYTES = "root".getBytes(StandardCharsets.UTF_8);
     private static final byte[] EMPTY_NAME_BYTES = new byte[0];
+    private static final int ENCODE_STREAM_BUFFER_SIZE = 64 * 1024;
+    private static final AtomicLong ENCODE_STREAM_SEQUENCE = new AtomicLong();
 
     @Override
     public <T> List<byte[]> encodeToByteArrayList(Collection<T> objects) throws EncodeSerializationException {
@@ -57,6 +62,43 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             throw e;
         } catch (RuntimeException | IOException e) {
             throw new EncodeSerializationException("Failed to encode object", e);
+        }
+    }
+
+    @Override
+    public <T> InputStream encodeToStream(T object) throws EncodeSerializationException {
+        if (object == null) throw new EncodeSerializationException("object is null");
+
+        final long payloadLength;
+        try {
+            payloadLength = measureValue(object, ROOT_NAME_BYTES, true);
+        } catch (EncodeSerializationException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new EncodeSerializationException("Failed to measure object", e);
+        }
+
+        try {
+            PipedInputStream input = new PipedInputStream(ENCODE_STREAM_BUFFER_SIZE);
+            PipedOutputStream output = new PipedOutputStream(input);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicBoolean consumerClosed = new AtomicBoolean();
+            Thread producer = new Thread(() -> {
+                try {
+                    encodeMeasured(object, output, payloadLength);
+                } catch (Throwable e) {
+                    if (!consumerClosed.get()) failure.compareAndSet(null, e);
+                } finally {
+                    try { output.close(); }
+                    catch (IOException e) {
+                        if (!consumerClosed.get()) failure.compareAndSet(null, e);
+                    }
+                }
+            }, "binary-object-encode-stream-" + ENCODE_STREAM_SEQUENCE.incrementAndGet());
+            producer.setDaemon(true);
+            return new EncodingInputStream(input, output, producer, failure, consumerClosed);
+        } catch (IOException e) {
+            throw new EncodeSerializationException("Failed to create encoding stream", e);
         }
     }
 
@@ -711,6 +753,99 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             return Math.max(128, map.size() * 48);
         }
         return 512;
+    }
+
+    private static final class EncodingInputStream extends InputStream {
+        private final PipedInputStream input;
+        private final PipedOutputStream output;
+        private final Thread producer;
+        private final AtomicReference<Throwable> failure;
+        private final AtomicBoolean consumerClosed;
+        private boolean started;
+        private boolean closed;
+
+        private EncodingInputStream(PipedInputStream input, PipedOutputStream output, Thread producer,
+                                    AtomicReference<Throwable> failure, AtomicBoolean consumerClosed) {
+            this.input = input;
+            this.output = output;
+            this.producer = producer;
+            this.failure = failure;
+            this.consumerClosed = consumerClosed;
+        }
+
+        @Override
+        public int read() throws IOException {
+            ensureStarted();
+            try {
+                return completed(input.read());
+            } catch (IOException e) {
+                throw failureOr(e);
+            }
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            Objects.checkFromIndexSize(offset, length, buffer.length);
+            if (length == 0) return 0;
+            ensureStarted();
+            try {
+                return completed(input.read(buffer, offset, length));
+            } catch (IOException e) {
+                throw failureOr(e);
+            }
+        }
+
+        @Override
+        public int available() throws IOException {
+            if (closed) throw new IOException("Encoding stream is closed");
+            return input.available();
+        }
+
+        @Override
+        public void close() throws IOException {
+            Thread activeProducer;
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+                consumerClosed.set(true);
+                activeProducer = started ? producer : null;
+            }
+
+            IOException failure = null;
+            try { input.close(); }
+            catch (IOException e) { failure = e; }
+            try { output.close(); }
+            catch (IOException e) {
+                if (failure == null) failure = e;
+                else failure.addSuppressed(e);
+            }
+            if (activeProducer != null) activeProducer.interrupt();
+            if (failure != null) throw failure;
+        }
+
+        private synchronized void ensureStarted() throws IOException {
+            if (closed) throw new IOException("Encoding stream is closed");
+            if (started) return;
+            started = true;
+            producer.start();
+        }
+
+        private int completed(int result) throws IOException {
+            if (result < 0) {
+                Throwable encodeFailure = failure.get();
+                if (encodeFailure != null) throw encodeFailure(encodeFailure);
+            }
+            return result;
+        }
+
+        private IOException failureOr(IOException streamFailure) {
+            Throwable encodeFailure = failure.get();
+            return encodeFailure == null ? streamFailure : encodeFailure(encodeFailure);
+        }
+
+        private IOException encodeFailure(Throwable cause) {
+            return new IOException("Failed to encode object stream", cause);
+        }
     }
 
     private static final class StreamingOutput {
