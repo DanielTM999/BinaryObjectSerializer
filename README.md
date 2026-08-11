@@ -127,11 +127,13 @@ continuam sujeitos ao limite de arrays da JVM; use `StreamContent` para dados
 potencialmente grandes.
 
 `StreamContent` pode ser estendido. Sem resolver, uma subclasse declarada no
-campo deve possuir um construtor sem argumentos; o decoder o invoca e conecta a
-instancia ao arquivo temporario. Se esse construtor nao existir ou falhar, o
-decode termina com `DecodeSerializationException`. Quando um resolver for
-usado, `completedContent()` deve devolver uma instancia compativel com o tipo do
-campo.
+campo deve possuir um construtor sem argumentos ou um construtor
+`(long, IOSupplier<InputStream>)`. O decoder tenta primeiro o construtor vazio e,
+se ele nao existir, usa o construtor com tamanho e origem; nos dois casos conecta
+a instancia ao ciclo de vida do arquivo temporario. Se nenhum desses construtores
+existir ou se a construcao falhar, o decode termina com
+`DecodeSerializationException`. Quando um resolver for usado,
+`completedContent()` deve devolver uma instancia compativel com o tipo do campo.
 
 Se nenhum `LargeContentResolver` for configurado, o decoder copia o campo em
 chunks para um arquivo temporario e devolve um `StreamContent` lazy. Chame

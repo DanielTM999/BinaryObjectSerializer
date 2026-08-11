@@ -71,13 +71,51 @@ public class StreamContent implements Closeable {
             StreamContent content = constructor.newInstance();
             content.initializeDecoded(size, source, cleanup);
             return content;
-        } catch (NoSuchMethodException e) {
-            throw new IOException("StreamContent subclass " + contentType.getName()
-                    + " must declare a no-args constructor when no LargeContentResolver is configured", e);
+        } catch (NoSuchMethodException noArgsError) {
+            try {
+                Constructor<? extends StreamContent> constructor = contentType.getDeclaredConstructor(
+                        long.class, IOSupplier.class
+                );
+                constructor.setAccessible(true);
+                StreamContent content = constructor.newInstance(size, source);
+                content.attachDecodedCleanup(cleanup);
+                return content;
+            } catch (NoSuchMethodException lengthAndSourceError) {
+                lengthAndSourceError.addSuppressed(noArgsError);
+                throw new IOException("StreamContent subclass " + contentType.getName()
+                        + " must declare either a no-args constructor or a (long, IOSupplier<InputStream>) "
+                        + "constructor when no LargeContentResolver is configured", lengthAndSourceError);
+            } catch (InstantiationException | IllegalAccessException | InvocationTargetException | RuntimeException e) {
+                throw new IOException("Failed to instantiate StreamContent subclass " + contentType.getName()
+                        + " using its (long, IOSupplier<InputStream>) constructor", e);
+            }
         } catch (InstantiationException | IllegalAccessException | InvocationTargetException | RuntimeException e) {
             throw new IOException("Failed to instantiate StreamContent subclass " + contentType.getName()
                     + " using its no-args constructor", e);
         }
+    }
+
+    private synchronized void attachDecodedCleanup(Closeable decodedCleanup) {
+        if (!initialized) throw new IllegalStateException("StreamContent is not initialized");
+        if (closed.get()) throw new IllegalStateException("StreamContent is already closed");
+
+        Closeable existingCleanup = cleanup;
+        Closeable attachedCleanup = Objects.requireNonNull(decodedCleanup, "decodedCleanup");
+        cleanup = () -> {
+            IOException failure = null;
+            try {
+                existingCleanup.close();
+            } catch (IOException e) {
+                failure = e;
+            }
+            try {
+                attachedCleanup.close();
+            } catch (IOException e) {
+                if (failure == null) failure = e;
+                else failure.addSuppressed(e);
+            }
+            if (failure != null) throw failure;
+        };
     }
 
     private synchronized void initializeDecoded(long length, IOSupplier<InputStream> source, Closeable cleanup) {
@@ -96,7 +134,7 @@ public class StreamContent implements Closeable {
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
         if (closed.compareAndSet(false, true)) cleanup.close();
     }
 }

@@ -168,15 +168,30 @@ class StreamingLargeContentTest {
     }
 
     @Test
-    void failsClearlyWhenStreamContentSubclassHasNoNoArgsConstructor() throws Exception {
+    void usesLengthAndSourceConstructorWhenStreamContentSubclassHasNoNoArgsConstructor() throws Exception {
         MissingConstructorAttachment source = new MissingConstructorAttachment();
         source.content = new MissingNoArgsContent(3, () -> new ByteArrayInputStream(new byte[]{1, 2, 3}));
         byte[] encoded = new BinaryObjectEncoderMapper().encodeToByteArray(source);
 
-        DecodeSerializationException error = assertThrows(DecodeSerializationException.class,
-                () -> new BinaryObjectDecoderMapper().readAsObject(encoded, MissingConstructorAttachment.class));
+        MissingConstructorAttachment decoded = new BinaryObjectDecoderMapper().readAsObject(
+                encoded, MissingConstructorAttachment.class
+        );
 
-        assertTrue(error.getMessage().contains("no-args constructor"));
+        assertInstanceOf(MissingNoArgsContent.class, decoded.content);
+        assertArrayEquals(new byte[]{1, 2, 3}, decoded.content.openStream().readAllBytes());
+        decoded.content.close();
+    }
+
+    @Test
+    void attachesTemporaryFileCleanupWhenUsingLengthAndSourceConstructor() throws Exception {
+        Path temporaryContent = tempDir.resolve("subclass-content.bin");
+        Files.write(temporaryContent, new byte[]{4, 5, 6});
+
+        StreamContent content = StreamContent.temporary(temporaryContent, MissingNoArgsContent.class);
+
+        assertInstanceOf(MissingNoArgsContent.class, content);
+        content.close();
+        assertFalse(Files.exists(temporaryContent));
     }
 
     private static byte[] patternedBytes(int length) {
