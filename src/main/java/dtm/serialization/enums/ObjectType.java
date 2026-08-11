@@ -12,7 +12,8 @@ public enum ObjectType {
     OBJECT((byte) 0x09),
     BYTES((byte) 0x10),
     LIST((byte) 0x11),
-    NULL((byte) 0x12);
+    NULL((byte) 0x12),
+    LARGE_CONTENT((byte) 0x13);
 
 
     private final byte id;
@@ -39,6 +40,7 @@ public enum ObjectType {
             case 0x10 -> BYTES;
             case 0x11 -> LIST;
             case 0x12 -> NULL;
+            case 0x13 -> LARGE_CONTENT;
             default -> null;
         };
     }

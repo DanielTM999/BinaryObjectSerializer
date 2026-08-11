@@ -3,6 +3,8 @@ package dtm.serialization.mapper;
 import dtm.serialization.annotations.ElementRef;
 import dtm.serialization.annotations.IgnoreElement;
 import dtm.serialization.annotations.IgnoreSuperClass;
+import dtm.serialization.annotations.LargeContent;
+import dtm.serialization.StreamContent;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
 import dtm.serialization.exceptions.SerializationException;
@@ -120,6 +122,11 @@ public abstract class BaseBinaryObjectSerializer {
 
                 field.setAccessible(true);
                 String elementName = getNameByElement(field);
+                boolean largeContent = field.isAnnotationPresent(LargeContent.class);
+                if (largeContent && !StreamContent.class.isAssignableFrom(field.getType())) {
+                    throw new SerializationException("@LargeContent field '" + field.getName()
+                            + "' must have type " + StreamContent.class.getName() + " or a subclass");
+                }
                 fields.add(new FieldCacheProps(
                         current,
                         phase,
@@ -127,7 +134,8 @@ public abstract class BaseBinaryObjectSerializer {
                         field.getType(),
                         field.getGenericType(),
                         elementName,
-                        elementName.getBytes(StandardCharsets.UTF_8)
+                        elementName.getBytes(StandardCharsets.UTF_8),
+                        largeContent
                 ));
             }
 
@@ -182,6 +190,7 @@ public abstract class BaseBinaryObjectSerializer {
             Class<?> fieldType,
             java.lang.reflect.Type genericType,
             String elementName,
-            byte[] elementNameBytes
+            byte[] elementNameBytes,
+            boolean largeContent
     ) {}
 }

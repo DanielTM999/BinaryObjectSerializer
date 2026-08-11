@@ -2,6 +2,7 @@ package dtm.serialization.mapper.models;
 
 import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.CollectionReference;
+import dtm.serialization.StreamContent;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.exceptions.DecodeSerializationException;
 
@@ -17,6 +18,7 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     private byte[] sourceBytes;
     private int sourceOffset;
     private int sourceLength;
+    private StreamContent streamContent;
     private final List<BinaryObjectNode> children;
     private Map<String, BinaryObjectNode> childrenByName;
     private final BiFunction<Object, DefaultBinaryObjectNode, Object> convertAction;
@@ -147,7 +149,20 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
 
     @Override
     public byte[] getAsBytes() {
+        if (objectType == ObjectType.LARGE_CONTENT) {
+            throw new DecodeSerializationException("Large content must be read with getAsStreamContent()");
+        }
         return materializedBytes();
+    }
+
+    @Override
+    public StreamContent getAsStreamContent() {
+        if (objectType != ObjectType.LARGE_CONTENT) {
+            throw new DecodeSerializationException(
+                    String.format("Node '%s' is not LARGE_CONTENT, but %s", name, objectType)
+            );
+        }
+        return streamContent;
     }
 
     @Override
@@ -225,6 +240,8 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
                 objectMap.put(node.getName(), node.getAsBoolean());
             } else if (node.getObjectType() == ObjectType.BYTES) {
                 objectMap.put(node.getName(), node.getAsBytes());
+            } else if (node.getObjectType() == ObjectType.LARGE_CONTENT) {
+                objectMap.put(node.getName(), node.getAsStreamContent());
             }else if (node.getObjectType() == ObjectType.LIST){
                 objectMap.put(node.getName(), node.getAsCollection(new CollectionReference<List<Object>>(){}));
             }
@@ -277,6 +294,12 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
         this.sourceBytes = sourceBytes;
         this.sourceOffset = sourceOffset;
         this.sourceLength = sourceLength;
+    }
+
+    public void setStreamContent(StreamContent streamContent) {
+        this.streamContent = streamContent;
+        this.bytesValue = new byte[0];
+        this.sourceBytes = null;
     }
 
     public void addChild(BinaryObjectNode  child) {
@@ -394,7 +417,8 @@ public class DefaultBinaryObjectNode implements BinaryObjectNode {
     }
 
     private boolean bytesValueIsContainer() {
-        return objectType == ObjectType.OBJECT || objectType == ObjectType.LIST;
+        return objectType == ObjectType.OBJECT || objectType == ObjectType.LIST
+                || objectType == ObjectType.LARGE_CONTENT;
     }
 
 }

@@ -3,7 +3,7 @@ package dtm.serialization.mapper;
 import dtm.serialization.BinaryObjectDecoder;
 import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.CollectionReference;
-import dtm.serialization.Constants;
+import dtm.serialization.*;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.DecodeSerializationException;
@@ -22,6 +22,8 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,221 +35,220 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     @Override
     public BinaryObjectNode readAsTree(byte[] bytes) throws DecodeSerializationException {
-        if (bytes == null) {
-            throw new DecodeSerializationException("bytes is null");
-        }
+        return readAsTreeWithOptions(bytes, DecodeOptions.DEFAULT);
+    }
 
-        try {
-            DefaultBinaryObjectNode rootNode = new DefaultBinaryObjectNode(this::convertTo);
-            BinaryInput input = new BinaryInput(bytes);
+    @Override
+    public BinaryObjectNode readAsTree(byte[] bytes, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsTreeWithOptions(bytes, DecodeOptions.DEFAULT.withObserver(observer));
+    }
 
-            validSignedByte(input);
-            validVersion(input);
-
-            long payloadSize = input.readPayloadLength();
-            if (payloadSize < 0 || payloadSize > Integer.MAX_VALUE) {
-                throw new DecodeSerializationException("Invalid payload size: " + payloadSize);
-            }
-
-            int payloadEnd = input.position() + (int) payloadSize;
-            if (payloadEnd > bytes.length) {
-                throw new DecodeSerializationException(
-                        "Protocol corrupted: payload incomplete, expected " + payloadSize + " bytes"
-                );
-            }
-
-            readNode(input, rootNode, payloadEnd);
-
-            if (input.position() < payloadEnd) {
-                throw new DecodeSerializationException(
-                        "Invalid serialization: extra bytes remaining after root node (" +
-                                (payloadEnd - input.position()) + " bytes)"
-                );
-            }
-
-            return rootNode;
-        } catch (DecodeSerializationException e) {
-            throw e;
-        } catch (RuntimeException e) {
-            throw new DecodeSerializationException("Failed to read bytes", e);
-        }
+    @Override
+    public BinaryObjectNode readAsTreeWithOptions(byte[] bytes, DecodeOptions options) throws DecodeSerializationException {
+        if (bytes == null) throw new DecodeSerializationException("bytes is null");
+        return readAsTreeWithOptions(new ByteArrayInputStream(bytes), options);
     }
 
     @Override
     public BinaryObjectNode readAsTree(File file) throws DecodeSerializationException {
-        try {
-            byte[] bytes = Files.readAllBytes(file.toPath());
-            return readAsTree(bytes);
-        } catch (IOException e) {
-            throw new DecodeSerializationException("Failed to read file", e);
-        }
+        return readAsTreeWithOptions(file, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public BinaryObjectNode readAsTree(File file, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsTreeWithOptions(file, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public BinaryObjectNode readAsTreeWithOptions(File file, DecodeOptions options) throws DecodeSerializationException {
+        if (file == null) throw new DecodeSerializationException("file is null");
+        try (InputStream input = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
+            return readAsTreeWithOptions(input, options);
+        } catch (IOException e) { throw new DecodeSerializationException("Failed to read file", e); }
     }
 
     @Override
     public BinaryObjectNode readAsTree(InputStream stream) throws DecodeSerializationException {
+        return readAsTreeWithOptions(stream, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public BinaryObjectNode readAsTree(InputStream stream, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsTreeWithOptions(stream, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public BinaryObjectNode readAsTreeWithOptions(InputStream stream, DecodeOptions options) throws DecodeSerializationException {
+        if (stream == null) throw new DecodeSerializationException("stream is null");
+        DecodeOptions actual = options == null ? DecodeOptions.DEFAULT : options;
+        ObservationContext observation = new ObservationContext(actual.observer());
         try {
-            return readAsTree(readFrame(stream));
-        } catch (IOException e) {
-            throw new DecodeSerializationException("Failed to read stream", e);
-        }
+            BinaryInput input = new BinaryInput(stream, observation, actual.largeContentResolver());
+            readProtocolHeader(input);
+            long payloadSize = input.readPayloadLength();
+            long payloadEnd = checkedEnd(input.position(), payloadSize, "payload");
+            input.beginPayload(payloadSize);
+            DefaultBinaryObjectNode root = new DefaultBinaryObjectNode(this::convertTo);
+            readNode(input, root, payloadEnd, new ArrayDeque<>());
+            requirePayloadEnd(input, payloadEnd);
+            return root;
+        } catch (DecodeSerializationException e) { throw e; }
+        catch (RuntimeException e) { throw new DecodeSerializationException("Failed to read stream", e); }
+        finally { observation.close(); }
     }
 
     @Override
     public <T> T readAsObject(byte[] bytes, Class<T> ref) throws DecodeSerializationException {
-        if (bytes == null) {
-            throw new DecodeSerializationException("bytes is null");
-        }
+        return readAsObjectWithOptions(bytes, ref, DecodeOptions.DEFAULT);
+    }
 
-        try {
-            BinaryInput input = new BinaryInput(bytes);
-            validSignedByte(input);
-            validVersion(input);
+    @Override
+    public <T> T readAsObject(byte[] bytes, Class<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsObjectWithOptions(bytes, ref, DecodeOptions.DEFAULT.withObserver(observer));
+    }
 
-            long payloadSize = input.readPayloadLength();
-            if (payloadSize < 0 || payloadSize > Integer.MAX_VALUE) {
-                throw new DecodeSerializationException("Invalid payload size: " + payloadSize);
-            }
-
-            int payloadEnd = input.position() + (int) payloadSize;
-            if (payloadEnd > bytes.length) {
-                throw new DecodeSerializationException(
-                        "Protocol corrupted: payload incomplete, expected " + payloadSize + " bytes"
-                );
-            }
-
-            Object value = readValue(input, ref, ref, payloadEnd);
-            if (input.position() < payloadEnd) {
-                throw new DecodeSerializationException(
-                        "Invalid serialization: extra bytes remaining after root node (" +
-                                (payloadEnd - input.position()) + " bytes)"
-                );
-            }
-
-            return ref.cast(value);
-        } catch (DecodeSerializationException e) {
-            throw e;
-        } catch (RuntimeException e) {
-            throw new DecodeSerializationException("Failed to read bytes", e);
-        }
+    @Override
+    public <T> T readAsObjectWithOptions(byte[] bytes, Class<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (bytes == null) throw new DecodeSerializationException("bytes is null");
+        return readAsObjectWithOptions(new ByteArrayInputStream(bytes), ref, options);
     }
 
     @Override
     public <T> T readAsObject(File file, Class<T> ref) throws DecodeSerializationException {
-        try {
-            return readAsObject(Files.readAllBytes(file.toPath()), ref);
-        } catch (IOException e) {
-            throw new DecodeSerializationException("Failed to read file", e);
-        }
+        return readAsObjectWithOptions(file, ref, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public <T> T readAsObject(File file, Class<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsObjectWithOptions(file, ref, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public <T> T readAsObjectWithOptions(File file, Class<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (file == null) throw new DecodeSerializationException("file is null");
+        try (InputStream input = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
+            return readAsObjectWithOptions(input, ref, options);
+        } catch (IOException e) { throw new DecodeSerializationException("Failed to read file", e); }
     }
 
     @Override
     public <T> T readAsObject(InputStream stream, Class<T> ref) throws DecodeSerializationException {
+        return readAsObjectWithOptions(stream, ref, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public <T> T readAsObject(InputStream stream, Class<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsObjectWithOptions(stream, ref, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public <T> T readAsObjectWithOptions(InputStream stream, Class<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (stream == null) throw new DecodeSerializationException("stream is null");
+        if (ref == null) throw new DecodeSerializationException("ref is null");
+        DecodeOptions actual = options == null ? DecodeOptions.DEFAULT : options;
+        ObservationContext observation = new ObservationContext(actual.observer());
         try {
-            return readAsObject(readFrame(stream), ref);
-        } catch (IOException e) {
-            throw new DecodeSerializationException("Failed to read stream", e);
-        }
+            BinaryInput input = new BinaryInput(stream, observation, actual.largeContentResolver());
+            readProtocolHeader(input);
+            long payloadSize = input.readPayloadLength();
+            long payloadEnd = checkedEnd(input.position(), payloadSize, "payload");
+            input.beginPayload(payloadSize);
+            Object value = readValue(input, ref, ref, payloadEnd, new ArrayDeque<>());
+            requirePayloadEnd(input, payloadEnd);
+            return ref.cast(value);
+        } catch (DecodeSerializationException e) { throw e; }
+        catch (RuntimeException e) { throw new DecodeSerializationException("Failed to read stream", e); }
+        finally { observation.close(); }
     }
 
 
     @Override
     public <T extends Collection<?>> T readAsCollection(byte[] bytes, CollectionReference<T> ref) throws DecodeSerializationException {
-        return readAsTree(bytes).getAsCollection(ref);
+        return readAsCollectionWithOptions(bytes, ref, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollection(byte[] bytes, CollectionReference<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsCollectionWithOptions(bytes, ref, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollectionWithOptions(byte[] bytes, CollectionReference<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (bytes == null) throw new DecodeSerializationException("bytes is null");
+        return readAsCollectionWithOptions(new ByteArrayInputStream(bytes), ref, options);
     }
 
     @Override
     public <T extends Collection<?>> T readAsCollection(File file, CollectionReference<T> ref) throws DecodeSerializationException {
-        return readAsTree(file).getAsCollection(ref);
+        return readAsCollectionWithOptions(file, ref, DecodeOptions.DEFAULT);
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollection(File file, CollectionReference<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsCollectionWithOptions(file, ref, DecodeOptions.DEFAULT.withObserver(observer));
+    }
+
+    @Override
+    public <T extends Collection<?>> T readAsCollectionWithOptions(File file, CollectionReference<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (file == null) throw new DecodeSerializationException("file is null");
+        try (InputStream input = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
+            return readAsCollectionWithOptions(input, ref, options);
+        } catch (IOException e) { throw new DecodeSerializationException("Failed to read file", e); }
     }
 
     @Override
     public <T extends Collection<?>> T readAsCollection(InputStream stream, CollectionReference<T> ref) throws DecodeSerializationException {
-        return  readAsTree(stream).getAsCollection(ref);
+        return readAsCollectionWithOptions(stream, ref, DecodeOptions.DEFAULT);
     }
 
-    private byte[] readFrame(InputStream stream) throws IOException {
-        int validator = stream.read();
-        if (validator == -1) {
-            throw new StreamEndException("Stream ended before validator byte");
-        }
-        if ((byte) validator != (byte) Constants.VALIDATOR_BYTE) {
-            throw new StreamEndException(
-                    String.format("Invalid protocol: missing validator byte 0xAA (got 0x%02X)", validator)
-            );
-        }
-
-        int version = stream.read();
-        if (version == -1) {
-            throw new StreamEndException("Stream ended before version byte");
-        }
-        if ((byte) version != Constants.VERSION_BYTE && (byte) version != Constants.LEGACY_VERSION_BYTE) {
-            throw new StreamEndException("Unsupported protocol version: " + version);
-        }
-
-        ByteArrayOutputStream header = new ByteArrayOutputStream(16);
-        header.write(validator);
-        header.write(version);
-
-        long payloadLength;
-        if ((byte) version == Constants.VERSION_BYTE) {
-            payloadLength = readVarLongFromStream(stream, header);
-        } else {
-            byte[] lenBytes = readExactly(stream, 8);
-            header.write(lenBytes, 0, 8);
-            payloadLength = ((long) (lenBytes[0] & 0xFF) << 56)
-                    | ((long) (lenBytes[1] & 0xFF) << 48)
-                    | ((long) (lenBytes[2] & 0xFF) << 40)
-                    | ((long) (lenBytes[3] & 0xFF) << 32)
-                    | ((long) (lenBytes[4] & 0xFF) << 24)
-                    | ((long) (lenBytes[5] & 0xFF) << 16)
-                    | ((long) (lenBytes[6] & 0xFF) << 8)
-                    | (long) (lenBytes[7] & 0xFF);
-        }
-
-        if (payloadLength < 0 || payloadLength > Integer.MAX_VALUE) {
-            throw new StreamEndException("Invalid payload size: " + payloadLength);
-        }
-
-        byte[] payload = readExactly(stream, (int) payloadLength);
-
-        byte[] headerBytes = header.toByteArray();
-        byte[] frame = new byte[headerBytes.length + payload.length];
-        System.arraycopy(headerBytes, 0, frame, 0, headerBytes.length);
-        System.arraycopy(payload, 0, frame, headerBytes.length, payload.length);
-        return frame;
+    @Override
+    public <T extends Collection<?>> T readAsCollection(InputStream stream, CollectionReference<T> ref, DescriptorObserver observer) throws DecodeSerializationException {
+        return readAsCollectionWithOptions(stream, ref, DecodeOptions.DEFAULT.withObserver(observer));
     }
 
-    private long readVarLongFromStream(InputStream stream, ByteArrayOutputStream sink) throws IOException {
-        long value = 0;
-        int shift = 0;
-        for (int i = 0; i < 10; i++) {
-            int b = stream.read();
-            if (b == -1) {
-                throw new StreamEndException("Stream ended in payload length varlong");
-            }
-            sink.write(b);
-            value |= (long) (b & 0x7F) << shift;
-            if ((b & 0x80) == 0) {
-                return value;
-            }
-            shift += 7;
-        }
-        throw new StreamEndException("Invalid varlong length");
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T extends Collection<?>> T readAsCollectionWithOptions(InputStream stream, CollectionReference<T> ref, DecodeOptions options) throws DecodeSerializationException {
+        if (stream == null) throw new DecodeSerializationException("stream is null");
+        if (ref == null) throw new DecodeSerializationException("ref is null");
+        Type type = ref.getType();
+        Class<?> raw = type instanceof ParameterizedType pt ? (Class<?>) pt.getRawType() : Collection.class;
+        DecodeOptions actual = optionsFor(options);
+        ObservationContext observation = new ObservationContext(actual.observer());
+        try {
+            BinaryInput input = new BinaryInput(stream, observation, actual.largeContentResolver());
+            readProtocolHeader(input);
+            long payloadSize = input.readPayloadLength();
+            long payloadEnd = checkedEnd(input.position(), payloadSize, "payload");
+            input.beginPayload(payloadSize);
+            Object value = readValue(input, raw, type, payloadEnd, new ArrayDeque<>());
+            requirePayloadEnd(input, payloadEnd);
+            return (T) value;
+        } catch (DecodeSerializationException e) { throw e; }
+        catch (RuntimeException e) { throw new DecodeSerializationException("Failed to read stream", e); }
+        finally { observation.close(); }
     }
 
-    private byte[] readExactly(InputStream stream, int n) throws IOException {
-        byte[] buf = new byte[n];
-        int read = 0;
-        while (read < n) {
-            int r = stream.read(buf, read, n - read);
-            if (r == -1) {
-                throw new StreamEndException(
-                        "Stream ended early: expected " + n + " bytes, got " + read
-                );
-            }
-            read += r;
+    private DecodeOptions optionsFor(DecodeOptions options) {
+        return options == null ? DecodeOptions.DEFAULT : options;
+    }
+
+    private void readProtocolHeader(BinaryInput input) {
+        validSignedByte(input);
+        validVersion(input);
+    }
+
+    private long checkedEnd(long start, long size, String kind) {
+        if (size < 0) throw new DecodeSerializationException("Invalid " + kind + " size: " + size);
+        try { return Math.addExact(start, size); }
+        catch (ArithmeticException e) { throw new DecodeSerializationException(kind + " size overflow", e); }
+    }
+
+    private void requirePayloadEnd(BinaryInput input, long payloadEnd) {
+        if (input.position() != payloadEnd) {
+            throw new DecodeSerializationException("Invalid serialization: root ended at " + input.position()
+                    + ", expected payload end " + payloadEnd);
         }
-        return buf;
     }
 
     private void validSignedByte(BinaryInput in) {
@@ -259,15 +260,22 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     private void validVersion(BinaryInput in) {
         byte version = in.readByte();
-        if (version != Constants.VERSION_BYTE && version != Constants.LEGACY_VERSION_BYTE) {
+        if (version != Constants.VERSION_BYTE && version != Constants.PREVIOUS_VERSION_BYTE
+                && version != Constants.LEGACY_VERSION_BYTE) {
             throw new DecodeSerializationException("Unsupported protocol version: " + version);
         }
-        in.useCompactLengths(version == Constants.VERSION_BYTE);
+        in.useVersion(version);
     }
 
-    private void readNode(BinaryInput input, DefaultBinaryObjectNode rootNode, int payloadLimit) {
+    private void readNode(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit, Deque<String> path) {
+        long descriptorStart = input.position();
         readNodeMetadata(input, rootNode);
-        readNodeBody(input, rootNode, payloadLimit);
+        input.descriptorStarted(rootNode.getName(), rootNode.getObjectType(), descriptorStart);
+        boolean added = rootNode.getName() != null && !rootNode.getName().isEmpty() && !"root".equals(rootNode.getName());
+        if (added) path.addLast(rootNode.getName());
+        readNodeBody(input, rootNode, payloadLimit, path);
+        if (added) path.removeLast();
+        input.descriptorFinished(rootNode.getName(), rootNode.getObjectType(), descriptorStart);
     }
 
     private void readNodeMetadata(BinaryInput input, DefaultBinaryObjectNode rootNode) {
@@ -299,13 +307,13 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         rootNode.setName(input.readString(nameSize));
     }
 
-    private void readNodeBody(BinaryInput input, DefaultBinaryObjectNode rootNode, int payloadLimit) {
-        int bodySize = getBodySize(input, rootNode.getObjectType());
+    private void readNodeBody(BinaryInput input, DefaultBinaryObjectNode rootNode, long payloadLimit, Deque<String> path) {
+        long bodySize = getBodySize(input, rootNode.getObjectType());
         if (bodySize < 0) throw new SerializationException("Invalid body size: " + bodySize);
 
-        int bodyStart = input.position();
-        int bodyEnd = bodyStart + bodySize;
-        if (bodyEnd < bodyStart || bodyEnd > payloadLimit) {
+        long bodyStart = input.position();
+        long bodyEnd = checkedEnd(bodyStart, bodySize, "node body");
+        if (bodyEnd > payloadLimit) {
             throw new DecodeSerializationException(
                     "Protocol corrupted: node body incomplete, expected " + bodySize + " bytes"
             );
@@ -313,15 +321,18 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
         switch (rootNode.getObjectType()) {
             case STRING, I64, I32, I16, I8, BOOLEAN, DOUBLE, FLOAT, BYTES, NULL -> {
-                rootNode.setBytesValue(input.bytes(), bodyStart, bodySize);
-                input.skip(bodySize);
+                rootNode.setBytesValue(input.readBytes(toArrayLength(bodySize, rootNode.getObjectType().name())));
+            }
+            case LARGE_CONTENT -> {
+                rootNode.setStreamContent(readLargeContent(input, rootNode.getName(), bodySize,
+                        null, StreamContent.class, path));
             }
 
             case OBJECT, LIST -> {
-                rootNode.setBytesValue(input.bytes(), bodyStart, bodySize);
+                rootNode.setBytesValue(new byte[0]);
                 while (input.position() < bodyEnd) {
                     DefaultBinaryObjectNode child = new DefaultBinaryObjectNode(this::convertTo);
-                    readNode(input, child, bodyEnd);
+                    readNode(input, child, bodyEnd, path);
                     rootNode.addChild(child);
                 }
             }
@@ -338,12 +349,19 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
     }
 
-    private Object readValue(BinaryInput input, Class<?> targetType, Type genericType, int payloadLimit) {
+    private Object readValue(BinaryInput input, Class<?> targetType, Type genericType, long payloadLimit, Deque<String> path) {
         NodeHeader header = readHeader(input, payloadLimit);
-        return readValueBody(input, header, targetType, genericType);
+        boolean added = header.name() != null && !header.name().isEmpty() && !"root".equals(header.name());
+        if (added) path.addLast(header.name());
+        try {
+            return readValueBody(input, header, targetType, genericType, path);
+        } finally {
+            if (added) path.removeLast();
+        }
     }
 
-    private NodeHeader readHeader(BinaryInput input, int payloadLimit) {
+    private NodeHeader readHeader(BinaryInput input, long payloadLimit) {
+        long descriptorStart = input.position();
         byte typeByte = input.readByte();
         ObjectType objectType = ObjectType.fromId(typeByte);
         if (objectType == null) {
@@ -356,27 +374,46 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         if (nameSize < 0) throw new DecodeSerializationException("Invalid name size: " + nameSize);
         String name = input.readString(nameSize);
 
-        int bodySize = getBodySize(input, objectType);
+        long bodySize = getBodySize(input, objectType);
         if (bodySize < 0) throw new SerializationException("Invalid body size: " + bodySize);
 
-        int bodyStart = input.position();
-        int bodyEnd = bodyStart + bodySize;
-        if (bodyEnd < bodyStart || bodyEnd > payloadLimit) {
+        long bodyStart = input.position();
+        long bodyEnd = checkedEnd(bodyStart, bodySize, "node body");
+        if (bodyEnd > payloadLimit) {
             throw new DecodeSerializationException(
                     "Protocol corrupted: node body incomplete, expected " + bodySize + " bytes"
             );
         }
 
-        return new NodeHeader(objectType, name, bodyStart, bodyEnd);
+        NodeHeader header = new NodeHeader(objectType, name, descriptorStart, bodyStart, bodyEnd);
+        input.descriptorStarted(header);
+        return header;
     }
 
-    private Object readValueBody(BinaryInput input, NodeHeader header, Class<?> targetType, Type genericType) {
+    private Object readValueBody(BinaryInput input, NodeHeader header, Class<?> targetType, Type genericType, Deque<String> path) {
+        Object value = readValueBodyUnobserved(input, header, targetType, genericType, path);
+        input.descriptorFinished(header);
+        return value;
+    }
+
+    private Object readValueBodyUnobserved(BinaryInput input, NodeHeader header, Class<?> targetType, Type genericType, Deque<String> path) {
         if (header.objectType() == ObjectType.NULL) {
             return primitiveDefault(targetType);
         }
 
+        if (header.objectType() == ObjectType.LARGE_CONTENT) {
+            if (!StreamContent.class.isAssignableFrom(targetType) && targetType != Object.class) {
+                throw new DecodeSerializationException("Node '" + header.name()
+                        + "' contains large content but target type is " + targetType.getName());
+            }
+            StreamContent content = readLargeContent(input, header.name(), header.bodySize(),
+                    null, targetType, path);
+            requireCompatibleStreamContent(targetType, content, header.name());
+            return content;
+        }
+
         if (targetType == Object.class) {
-            return readDynamicBody(input, header);
+            return readDynamicBody(input, header, path);
         }
 
         if (targetType == byte[].class) {
@@ -389,21 +426,21 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
 
         if (targetType.isArray()) {
-            return readArrayBody(input, header, targetType);
+            return readArrayBody(input, header, targetType, path);
         }
 
         if (Collection.class.isAssignableFrom(targetType)) {
-            return readCollectionBody(input, header, targetType, genericType);
+            return readCollectionBody(input, header, targetType, genericType, path);
         }
 
         if (Map.class.isAssignableFrom(targetType)) {
-            return readMapBody(input, header, genericType);
+            return readMapBody(input, header, genericType, path);
         }
 
-        return readObjectBody(input, header, targetType);
+        return readObjectBody(input, header, targetType, path);
     }
 
-    private Object readObjectBody(BinaryInput input, NodeHeader header, Class<?> targetType) {
+    private Object readObjectBody(BinaryInput input, NodeHeader header, Class<?> targetType, Deque<String> path) {
         expectType(header, ObjectType.OBJECT, targetType.getSimpleName());
 
         Object instance = createInstanceOf(targetType);
@@ -415,10 +452,31 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
             if (fieldCacheProps == null) {
                 input.skip(childHeader.bodySize());
+                input.descriptorFinished(childHeader);
                 continue;
             }
 
-            Object value = readValueBody(input, childHeader, fieldCacheProps.fieldType(), fieldCacheProps.genericType());
+            path.addLast(childHeader.name());
+            Object value;
+            try {
+                if (fieldCacheProps.largeContent()) {
+                    if (childHeader.objectType() == ObjectType.NULL) {
+                        value = readValueBody(input, childHeader, fieldCacheProps.fieldType(), fieldCacheProps.genericType(), path);
+                    } else if (childHeader.objectType() != ObjectType.LARGE_CONTENT) {
+                        throw new DecodeSerializationException("@LargeContent field '" + childHeader.name()
+                                + "' expected LARGE_CONTENT but found " + childHeader.objectType());
+                    } else {
+                        value = readLargeContent(input, childHeader.name(), childHeader.bodySize(),
+                                targetType, fieldCacheProps.fieldType(), path);
+                        requireCompatibleStreamContent(fieldCacheProps.fieldType(), (StreamContent) value, childHeader.name());
+                        input.descriptorFinished(childHeader);
+                    }
+                } else {
+                    value = readValueBody(input, childHeader, fieldCacheProps.fieldType(), fieldCacheProps.genericType(), path);
+                }
+            } finally {
+                path.removeLast();
+            }
             try {
                 setDecodedField(instance, fieldCacheProps.field(), fieldCacheProps.fieldType(), value);
             } catch (IllegalAccessException e) {
@@ -432,7 +490,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         return instance;
     }
 
-    private Object readCollectionBody(BinaryInput input, NodeHeader header, Class<?> collectionType, Type genericType) {
+    private Object readCollectionBody(BinaryInput input, NodeHeader header, Class<?> collectionType, Type genericType, Deque<String> path) {
         expectType(header, ObjectType.LIST, collectionType.getSimpleName());
 
         Type elementType = Object.class;
@@ -446,13 +504,13 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                 : new HashSet<>();
 
         while (input.position() < header.bodyEnd()) {
-            collection.add(readValue(input, elementClass, elementType, header.bodyEnd()));
+            collection.add(readValue(input, elementClass, elementType, header.bodyEnd(), path));
         }
 
         return collection;
     }
 
-    private Object readArrayBody(BinaryInput input, NodeHeader header, Class<?> arrayType) {
+    private Object readArrayBody(BinaryInput input, NodeHeader header, Class<?> arrayType, Deque<String> path) {
         if (arrayType == byte[].class) {
             return readBytesBody(input, header);
         }
@@ -469,7 +527,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         Class<?> componentType = arrayType.getComponentType();
         List<Object> values = new ArrayList<>();
         while (input.position() < header.bodyEnd()) {
-            values.add(readValue(input, componentType, componentType, header.bodyEnd()));
+            values.add(readValue(input, componentType, componentType, header.bodyEnd(), path));
         }
 
         Object array = Array.newInstance(componentType, values.size());
@@ -486,6 +544,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = readIntBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
@@ -497,6 +556,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = readLongBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
@@ -508,6 +568,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = readDoubleBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
@@ -519,6 +580,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = readFloatBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
@@ -530,6 +592,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = readBooleanBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
@@ -541,11 +604,12 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
             if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
             values[size++] = (short) readIntBody(input, childHeader);
+            input.descriptorFinished(childHeader);
         }
         return Arrays.copyOf(values, size);
     }
 
-    private Map<String, Object> readMapBody(BinaryInput input, NodeHeader header, Type genericType) {
+    private Map<String, Object> readMapBody(BinaryInput input, NodeHeader header, Type genericType, Deque<String> path) {
         expectType(header, ObjectType.OBJECT, "Map");
 
         Type valueType = Object.class;
@@ -559,14 +623,17 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
         while (input.position() < header.bodyEnd()) {
             NodeHeader childHeader = readHeader(input, header.bodyEnd());
-            Object value = readValueBody(input, childHeader, valueClass, valueType);
+            path.addLast(childHeader.name());
+            Object value;
+            try { value = readValueBody(input, childHeader, valueClass, valueType, path); }
+            finally { path.removeLast(); }
             map.put(childHeader.name(), value);
         }
 
         return map;
     }
 
-    private Object readDynamicBody(BinaryInput input, NodeHeader header) {
+    private Object readDynamicBody(BinaryInput input, NodeHeader header, Deque<String> path) {
         return switch (header.objectType()) {
             case STRING -> readStringBody(input, header);
             case I8 -> (byte) readIntBody(input, header);
@@ -580,12 +647,14 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             case LIST -> {
                 List<Object> list = new ArrayList<>();
                 while (input.position() < header.bodyEnd()) {
-                    list.add(readValue(input, Object.class, Object.class, header.bodyEnd()));
+                    list.add(readValue(input, Object.class, Object.class, header.bodyEnd(), path));
                 }
                 yield list;
             }
-            case OBJECT -> readMapBody(input, header, Object.class);
+            case OBJECT -> readMapBody(input, header, Object.class, path);
             case NULL -> null;
+            case LARGE_CONTENT -> readLargeContent(input, header.name(), header.bodySize(),
+                    null, StreamContent.class, path);
         };
     }
 
@@ -654,9 +723,7 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     private String readStringBody(BinaryInput input, NodeHeader header) {
         expectType(header, ObjectType.STRING, "String");
-        String value = new String(input.bytes(), input.position(), header.bodySize(), StandardCharsets.UTF_8);
-        input.skip(header.bodySize());
-        return value;
+        return new String(input.readBytes(toArrayLength(header.bodySize(), "STRING")), StandardCharsets.UTF_8);
     }
 
     private boolean readBooleanBody(BinaryInput input, NodeHeader header) {
@@ -707,9 +774,55 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
 
     private byte[] readBytesBody(BinaryInput input, NodeHeader header) {
         expectType(header, ObjectType.BYTES, "byte[]");
-        byte[] bytes = Arrays.copyOfRange(input.bytes(), input.position(), header.bodyEnd());
-        input.skip(header.bodySize());
-        return bytes;
+        return input.readBytes(toArrayLength(header.bodySize(), "BYTES"));
+    }
+
+    private StreamContent readLargeContent(BinaryInput input, String name, long length,
+                                           Class<?> ownerType, Class<?> targetContentType,
+                                           Deque<String> path) {
+        LargeContentResolver resolver = input.largeContentResolver();
+        LargeContentDestination destination = null;
+        try {
+            Class<? extends StreamContent> concreteType = targetContentType != null
+                    && StreamContent.class.isAssignableFrom(targetContentType)
+                    ? targetContentType.asSubclass(StreamContent.class)
+                    : StreamContent.class;
+            destination = resolver == null
+                    ? LargeContentDestination.temporary(concreteType)
+                    : resolver.resolve(new LargeContentContext(List.copyOf(path), name, length, ownerType));
+            if (destination == null) throw new IOException("LargeContentResolver returned null");
+            try (OutputStream output = destination.output()) {
+                input.copyExactly(output, length, name, ObjectType.LARGE_CONTENT);
+            }
+            StreamContent result = destination.completedContent();
+            if (result == null) throw new IOException("LargeContentDestination returned null content");
+            if (result.length() != length) {
+                throw new IOException("Completed content length mismatch: expected " + length
+                        + ", got " + result.length());
+            }
+            return result;
+        } catch (IOException | RuntimeException e) {
+            if (destination != null) destination.abort();
+            throw new DecodeSerializationException("Failed to store large content '" + name + "': "
+                    + e.getMessage(), e);
+        }
+    }
+
+    private int toArrayLength(long size, String type) {
+        if (size < 0 || size > Integer.MAX_VALUE) {
+            throw new DecodeSerializationException(type + " body is too large for an in-memory Java value: "
+                    + size + "; use @LargeContent StreamContent");
+        }
+        return (int) size;
+    }
+
+    private void requireCompatibleStreamContent(Class<?> targetType, StreamContent content, String name) {
+        if (targetType != Object.class && !targetType.isInstance(content)) {
+            try { content.close(); } catch (IOException ignored) { }
+            throw new DecodeSerializationException("LargeContentResolver returned "
+                    + content.getClass().getName() + " for field '" + name + "', but the field requires "
+                    + targetType.getName() + ". Configure a LargeContentResolver for subclass fields.");
+        }
     }
 
     private void setDecodedField(Object instance, Field field, Class<?> fieldType, Object value) throws IllegalAccessException {
@@ -772,8 +885,8 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         );
     }
 
-    private record NodeHeader(ObjectType objectType, String name, int bodyStart, int bodyEnd) {
-        private int bodySize() {
+    private record NodeHeader(ObjectType objectType, String name, long descriptorStart, long bodyStart, long bodyEnd) {
+        private long bodySize() {
             return bodyEnd - bodyStart;
         }
     }
@@ -808,8 +921,13 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
                 case FLOAT -> Float.class;
                 case DOUBLE -> Double.class;
                 case I64 -> Long.class;
+                case LARGE_CONTENT -> StreamContent.class;
                 default -> Map.class;
             };
+        }
+
+        if (clazz.equals(StreamContent.class)) {
+            return node.getAsStreamContent();
         }
 
         if(isSimpleType(clazz)){
@@ -1437,9 +1555,9 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         );
     }
 
-    private int getBodySize(BinaryInput input, ObjectType objectType) {
+    private long getBodySize(BinaryInput input, ObjectType objectType) {
         return switch (objectType) {
-            case STRING, OBJECT, LIST, BYTES -> input.readLength();
+            case STRING, OBJECT, LIST, BYTES, LARGE_CONTENT -> input.readBodyLength();
             case NULL -> 0;
             case BOOLEAN, I8 -> 1;
             case I16 -> 2;
@@ -1449,29 +1567,232 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         };
     }
 
+    private static final class ObservationContext {
+        private final ObserverDispatcher dispatcher;
+        private long payloadStart;
+        private long payloadSize;
+        private int lastProgressPercentage = -1;
+
+        private ObservationContext(DescriptorObserver observer) {
+            dispatcher = observer == null ? null : new ObserverDispatcher(observer);
+        }
+
+        private void beginPayload(long payloadStart, long payloadSize) {
+            this.payloadStart = payloadStart;
+            this.payloadSize = payloadSize;
+        }
+
+        private void descriptorStarted(String name, ObjectType type, long descriptorStart) {
+            if (dispatcher == null) return;
+            DescriptorEvent event = event(name, type, descriptorStart, descriptorStart);
+            dispatcher.descriptorStarted(event);
+            progress(event);
+        }
+
+        private void descriptorFinished(String name, ObjectType type, long descriptorStart, long position) {
+            if (dispatcher == null) return;
+            DescriptorEvent event = event(name, type, descriptorStart, position);
+            progress(event);
+            dispatcher.descriptorFinished(event);
+        }
+
+        private void descriptorProgress(String name, ObjectType type, long descriptorStart, long position) {
+            if (dispatcher == null) return;
+            progress(event(name, type, descriptorStart, position));
+        }
+
+        private DescriptorEvent event(String name, ObjectType type, long descriptorStart, long position) {
+            long offset = Math.max(0L, descriptorStart - payloadStart);
+            long processed = Math.max(0L, Math.min(payloadSize, position - payloadStart));
+            double percentage = payloadSize == 0 ? 100.0 : processed * 100.0 / payloadSize;
+            return new DescriptorEvent(name, type, offset, processed, payloadSize, percentage);
+        }
+
+        private void progress(DescriptorEvent event) {
+            int percentage = (int) Math.floor(event.percentage());
+            if (percentage <= lastProgressPercentage) return;
+            lastProgressPercentage = percentage;
+            dispatcher.progress(event);
+        }
+
+        private void close() {
+            if (dispatcher != null) dispatcher.close();
+        }
+    }
+
+    private static final class ObserverDispatcher {
+        private final DescriptorObserver observer;
+        private final ExecutorService executor;
+        private final boolean autoClose;
+        private final Deque<Runnable> callbacks = new ArrayDeque<>();
+        private boolean running;
+        private boolean closed;
+
+        private ObserverDispatcher(DescriptorObserver observer) {
+            this.observer = observer;
+
+            ExecutorService configuredExecutor = null;
+            try {
+                configuredExecutor = observer.getExecutorService();
+            } catch (Throwable ignored) {
+                // Observer configuration must not affect decoding.
+            }
+
+            executor = configuredExecutor == null ? ForkJoinPool.commonPool() : configuredExecutor;
+
+            boolean closeConfiguredExecutor = false;
+            if (configuredExecutor != null && configuredExecutor != ForkJoinPool.commonPool()) {
+                try {
+                    closeConfiguredExecutor = observer.shouldAutoCloseExecutorService();
+                } catch (Throwable ignored) {
+                    // Keep an executor open when ownership cannot be determined safely.
+                }
+            }
+            autoClose = closeConfiguredExecutor;
+        }
+
+        private void descriptorStarted(DescriptorEvent event) {
+            dispatch(() -> observer.onDescriptorStarted(event));
+        }
+
+        private void descriptorFinished(DescriptorEvent event) {
+            dispatch(() -> observer.onDescriptorFinished(event));
+        }
+
+        private void progress(DescriptorEvent event) {
+            dispatch(() -> observer.onProgress(event));
+        }
+
+        private void dispatch(Runnable callback) {
+            boolean startDrain = false;
+            synchronized (this) {
+                if (closed) return;
+                callbacks.addLast(callback);
+                if (!running) {
+                    running = true;
+                    startDrain = true;
+                }
+            }
+
+            if (startDrain) {
+                ForkJoinPool.commonPool().execute(() -> {
+                    try {
+                        executor.execute(this::drain);
+                    } catch (Throwable ignored) {
+                        discardCallbacks();
+                    }
+                });
+            }
+        }
+
+        private void drain() {
+            while (true) {
+                Runnable callback;
+                boolean shutdown;
+                synchronized (this) {
+                    callback = callbacks.pollFirst();
+                    if (callback == null) {
+                        running = false;
+                        shutdown = closed && autoClose;
+                    } else {
+                        shutdown = false;
+                    }
+                }
+
+                if (callback == null) {
+                    if (shutdown) shutdownExecutor();
+                    return;
+                }
+
+                try {
+                    callback.run();
+                } catch (Throwable ignored) {
+                    // Observer failures are deliberately isolated from decoding.
+                }
+            }
+        }
+
+        private void discardCallbacks() {
+            boolean shutdown;
+            synchronized (this) {
+                callbacks.clear();
+                running = false;
+                shutdown = closed && autoClose;
+            }
+            if (shutdown) shutdownExecutor();
+        }
+
+        private void close() {
+            boolean shutdown;
+            synchronized (this) {
+                closed = true;
+                shutdown = !running && autoClose;
+            }
+            if (shutdown) shutdownExecutor();
+        }
+
+        private void shutdownExecutor() {
+            try {
+                executor.shutdown();
+            } catch (Throwable ignored) {
+                // Executor lifecycle failures must not affect decoding.
+            }
+        }
+    }
+
     private static final class BinaryInput {
-        private final byte[] bytes;
-        private int position;
+        private static final int BUFFER_SIZE = 64 * 1024;
+        private final InputStream source;
+        private final ObservationContext observation;
+        private final LargeContentResolver largeContentResolver;
+        private long position;
         private boolean compactLengths;
+        private boolean longBodyLengths;
 
-        private BinaryInput(byte[] bytes) {
-            this.bytes = bytes;
+        private BinaryInput(InputStream source, ObservationContext observation,
+                            LargeContentResolver largeContentResolver) {
+            this.source = source;
+            this.observation = observation;
+            this.largeContentResolver = largeContentResolver;
         }
 
-        private byte[] bytes() {
-            return bytes;
-        }
-
-        private int position() {
+        private long position() {
             return position;
         }
 
-        private void useCompactLengths(boolean compactLengths) {
-            this.compactLengths = compactLengths;
+        private LargeContentResolver largeContentResolver() { return largeContentResolver; }
+
+        private void beginPayload(long payloadSize) {
+            observation.beginPayload(position, payloadSize);
+        }
+
+        private void descriptorStarted(NodeHeader header) {
+            descriptorStarted(header.name(), header.objectType(), header.descriptorStart());
+        }
+
+        private void descriptorStarted(String name, ObjectType type, long descriptorStart) {
+            observation.descriptorStarted(name, type, descriptorStart);
+        }
+
+        private void descriptorFinished(NodeHeader header) {
+            descriptorFinished(header.name(), header.objectType(), header.descriptorStart());
+        }
+
+        private void descriptorFinished(String name, ObjectType type, long descriptorStart) {
+            observation.descriptorFinished(name, type, descriptorStart, position);
+        }
+
+        private void useVersion(byte version) {
+            this.compactLengths = version != Constants.LEGACY_VERSION_BYTE;
+            this.longBodyLengths = version == Constants.VERSION_BYTE;
         }
 
         private int readLength() {
             return compactLengths ? readVarInt() : readInt();
+        }
+
+        private long readBodyLength() {
+            return longBodyLengths ? readVarLong() : readLength();
         }
 
         private long readPayloadLength() {
@@ -1479,40 +1800,36 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
         }
 
         private byte readByte() {
-            require(1);
-            return bytes[position++];
+            try {
+                int value = source.read();
+                if (value < 0) throw new StreamEndException("Unexpected end of input at byte " + position);
+                position++;
+                return (byte) value;
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed to read input at byte " + position, e);
+            }
         }
 
         private int readInt() {
-            require(4);
-            int value = ((bytes[position] & 0xFF) << 24)
-                    | ((bytes[position + 1] & 0xFF) << 16)
-                    | ((bytes[position + 2] & 0xFF) << 8)
-                    | (bytes[position + 3] & 0xFF);
-            position += 4;
-            return value;
+            return ((readByte() & 0xFF) << 24)
+                    | ((readByte() & 0xFF) << 16)
+                    | ((readByte() & 0xFF) << 8)
+                    | (readByte() & 0xFF);
         }
 
         private short readShort() {
-            require(2);
-            short value = (short) (((bytes[position] & 0xFF) << 8)
-                    | (bytes[position + 1] & 0xFF));
-            position += 2;
-            return value;
+            return (short) (((readByte() & 0xFF) << 8) | (readByte() & 0xFF));
         }
 
         private long readLong() {
-            require(8);
-            long value = ((long) (bytes[position] & 0xFF) << 56)
-                    | ((long) (bytes[position + 1] & 0xFF) << 48)
-                    | ((long) (bytes[position + 2] & 0xFF) << 40)
-                    | ((long) (bytes[position + 3] & 0xFF) << 32)
-                    | ((long) (bytes[position + 4] & 0xFF) << 24)
-                    | ((long) (bytes[position + 5] & 0xFF) << 16)
-                    | ((long) (bytes[position + 6] & 0xFF) << 8)
-                    | (long) (bytes[position + 7] & 0xFF);
-            position += 8;
-            return value;
+            return ((long) (readByte() & 0xFF) << 56)
+                    | ((long) (readByte() & 0xFF) << 48)
+                    | ((long) (readByte() & 0xFF) << 40)
+                    | ((long) (readByte() & 0xFF) << 32)
+                    | ((long) (readByte() & 0xFF) << 24)
+                    | ((long) (readByte() & 0xFF) << 16)
+                    | ((long) (readByte() & 0xFF) << 8)
+                    | (long) (readByte() & 0xFF);
         }
 
         private int readVarInt() {
@@ -1547,23 +1864,61 @@ public class BinaryObjectDecoderMapper extends BinaryObjectEncoderMapper impleme
             if (length < 0) {
                 throw new DecodeSerializationException("Invalid string length: " + length);
             }
-            require(length);
-            String value = new String(bytes, position, length, StandardCharsets.UTF_8);
-            position += length;
-            return value;
+            return new String(readBytes(length), StandardCharsets.UTF_8);
         }
 
-        private void skip(int length) {
+        private byte[] readBytes(int length) {
+            if (length < 0) throw new DecodeSerializationException("Invalid byte length: " + length);
+            byte[] result = new byte[length];
+            readInto(result, 0, length);
+            return result;
+        }
+
+        private void readInto(byte[] target, int offset, int length) {
+            int total = 0;
+            try {
+                while (total < length) {
+                    int read = source.read(target, offset + total, Math.min(BUFFER_SIZE, length - total));
+                    if (read < 0) throw new StreamEndException("Unexpected end of input at byte " + position);
+                    if (read == 0) continue;
+                    total += read;
+                    position += read;
+                }
+            } catch (IOException e) {
+                throw new DecodeSerializationException("Failed to read input at byte " + position, e);
+            }
+        }
+
+        private void skip(long length) {
             if (length < 0) {
                 throw new DecodeSerializationException("Invalid skip length: " + length);
             }
-            require(length);
-            position += length;
+            byte[] buffer = new byte[(int) Math.min(BUFFER_SIZE, Math.max(1L, length))];
+            long remaining = length;
+            while (remaining > 0) {
+                int chunk = (int) Math.min(buffer.length, remaining);
+                readInto(buffer, 0, chunk);
+                remaining -= chunk;
+            }
         }
 
-        private void require(int length) {
-            if (position + length < position || position + length > bytes.length) {
-                throw new DecodeSerializationException("Unexpected end of input");
+        private void copyExactly(OutputStream output, long length, String name, ObjectType type) throws IOException {
+            if (length < 0) throw new DecodeSerializationException("Invalid content length: " + length);
+            byte[] buffer = new byte[(int) Math.min(BUFFER_SIZE, Math.max(1L, length))];
+            long remaining = length;
+            long descriptorStart = position;
+            while (remaining > 0) {
+                int chunk = (int) Math.min(buffer.length, remaining);
+                int read;
+                try { read = source.read(buffer, 0, chunk); }
+                catch (IOException e) { throw new IOException("Failed reading large content at byte " + position, e); }
+                if (read < 0) throw new EOFException("Large content ended early: expected " + length
+                        + " bytes, got " + (length - remaining));
+                if (read == 0) continue;
+                output.write(buffer, 0, read);
+                position += read;
+                remaining -= read;
+                observation.descriptorProgress(name, type, descriptorStart, position);
             }
         }
     }

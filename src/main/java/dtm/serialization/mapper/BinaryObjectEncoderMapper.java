@@ -3,10 +3,16 @@ package dtm.serialization.mapper;
 import dtm.serialization.BinaryObjectEncoder;
 import dtm.serialization.BinaryObjectNode;
 import dtm.serialization.Constants;
+import dtm.serialization.StreamContent;
 import dtm.serialization.enums.ObjectType;
 import dtm.serialization.enums.SerializationType;
 import dtm.serialization.exceptions.EncodeSerializationException;
 
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -36,21 +42,259 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
         if (object == null) throw new EncodeSerializationException("object is null");
 
         try {
-            BinaryOutput out = new BinaryOutput(estimateInitialCapacity(object));
-            out.writeByte(Constants.VALIDATOR_BYTE);
-            out.writeByte(Constants.VERSION_BYTE);
-
-            int payloadLengthPos = out.reserveVarLong();
-            int payloadStart = out.position();
-            encode(out, object, ROOT_NAME_BYTES);
-            out.writeVarLongAt(payloadLengthPos, out.position() - payloadStart);
-
-            return out.toByteArray();
+            long payloadLength = measureValue(object, ROOT_NAME_BYTES, true);
+            long totalLength = 2L + varLongLength(payloadLength) + payloadLength;
+            if (totalLength > Integer.MAX_VALUE) {
+                throw new EncodeSerializationException(
+                        "Encoded value is too large for byte[]; use encode(value, OutputStream)"
+                );
+            }
+            ByteArrayOutputStream destination = new ByteArrayOutputStream((int) Math.min(totalLength, 1_048_576L));
+            encodeMeasured(object, destination, payloadLength);
+            return destination.toByteArray();
         } catch (EncodeSerializationException e) {
             throw e;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | IOException e) {
             throw new EncodeSerializationException("Failed to encode object", e);
         }
+    }
+
+    @Override
+    public <T> void encode(T object, OutputStream destination) throws EncodeSerializationException {
+        if (object == null) throw new EncodeSerializationException("object is null");
+        if (destination == null) throw new EncodeSerializationException("destination is null");
+        try {
+            encodeMeasured(object, destination, measureValue(object, ROOT_NAME_BYTES, true));
+        } catch (EncodeSerializationException e) {
+            throw e;
+        } catch (IOException | RuntimeException e) {
+            throw new EncodeSerializationException("Failed to encode object", e);
+        }
+    }
+
+    private void encodeMeasured(Object object, OutputStream destination, long payloadLength) throws IOException {
+        StreamingOutput out = new StreamingOutput(destination);
+        out.writeByte(Constants.VALIDATOR_BYTE);
+        out.writeByte(Constants.VERSION_BYTE);
+        out.writeVarLong(payloadLength);
+        long payloadStart = out.position();
+        writeValue(out, object, ROOT_NAME_BYTES, true);
+        if (out.position() - payloadStart != payloadLength) {
+            throw new EncodeSerializationException("Object changed while it was being encoded");
+        }
+    }
+
+    private long measureValue(Object value, byte[] name, boolean allowLargeContent) {
+        if (value == null) return headerSize(name);
+        if (value instanceof StreamContent content) {
+            if (!allowLargeContent) {
+                throw new EncodeSerializationException("StreamContent fields must be annotated with @LargeContent");
+            }
+            return variableSize(name, content.length());
+        }
+        Class<?> type = value.getClass();
+        if (type.isEnum()) return measureString(((Enum<?>) value).name(), name);
+        if (value instanceof Byte) return fixedSize(name, 1);
+        if (type == byte[].class) return variableSize(name, ((byte[]) value).length);
+        if (value instanceof String s) return measureString(s, name);
+        if (value instanceof Short) return fixedSize(name, 2);
+        if (value instanceof Integer || value instanceof Float || value instanceof AtomicInteger) return fixedSize(name, 4);
+        if (value instanceof Long || value instanceof Double || value instanceof AtomicLong) return fixedSize(name, 8);
+        if (value instanceof Boolean || value instanceof AtomicBoolean) return fixedSize(name, 1);
+        if (value instanceof BigInteger || value instanceof BigDecimal || value instanceof Character) {
+            return measureString(value.toString(), name);
+        }
+        if (type.isArray()) return measureArray(value, name);
+        if (value instanceof Collection<?> collection) return measureCollection(collection, name);
+        if (value instanceof Map<?, ?> map) return measureMap(map, name);
+        if (value instanceof BinaryObjectNode node) return measureNode(node, name);
+        return measureObject(value, name);
+    }
+
+    private long measureString(String value, byte[] name) {
+        return variableSize(name, value.getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    private long measureObject(Object value, byte[] name) {
+        long body = 0;
+        for (FieldCacheProps props : resolveFields(value.getClass(), SerializationType.ENCODE)) {
+            try {
+                body = add(body, measureValue(props.field().get(value), props.elementNameBytes(), props.largeContent()));
+            } catch (IllegalAccessException e) {
+                throw new EncodeSerializationException("Failed to access field: " + props.field().getName(), e);
+            }
+        }
+        return variableSize(name, body);
+    }
+
+    private long measureCollection(Collection<?> values, byte[] name) {
+        long body = 0;
+        for (Object value : values) body = add(body, measureValue(value, EMPTY_NAME_BYTES, false));
+        return variableSize(name, body);
+    }
+
+    private long measureArray(Object values, byte[] name) {
+        if (values instanceof byte[] bytes) return variableSize(name, bytes.length);
+        long body = 0;
+        for (int i = 0; i < Array.getLength(values); i++) {
+            body = add(body, measureValue(Array.get(values, i), EMPTY_NAME_BYTES, false));
+        }
+        return variableSize(name, body);
+    }
+
+    private long measureMap(Map<?, ?> values, byte[] name) {
+        long body = 0;
+        int index = 0;
+        for (Map.Entry<?, ?> entry : values.entrySet()) {
+            byte[] key = Objects.toString(entry.getKey(), String.valueOf(index++)).getBytes(StandardCharsets.UTF_8);
+            body = add(body, measureValue(entry.getValue(), key, false));
+        }
+        return variableSize(name, body);
+    }
+
+    private long measureNode(BinaryObjectNode node, byte[] name) {
+        if (node.getObjectType() == ObjectType.LARGE_CONTENT) {
+            return variableSize(name, node.getAsStreamContent().length());
+        }
+        if (node.getObjectType() == ObjectType.OBJECT || node.getObjectType() == ObjectType.LIST) {
+            long body = 0;
+            for (BinaryObjectNode child : node.getChildren()) {
+                body = add(body, measureNode(child, child.getName().getBytes(StandardCharsets.UTF_8)));
+            }
+            return variableSize(name, body);
+        }
+        if (node.getObjectType() == ObjectType.NULL) return headerSize(name);
+        int length = node.getAsBytes().length;
+        return isVariable(node.getObjectType()) ? variableSize(name, length) : fixedSize(name, length);
+    }
+
+    private void writeValue(StreamingOutput out, Object value, byte[] name, boolean allowLargeContent) throws IOException {
+        if (value == null) { writeStreamingHeader(out, ObjectType.NULL, name); return; }
+        if (value instanceof StreamContent content) {
+            if (!allowLargeContent) throw new EncodeSerializationException("StreamContent fields must be annotated with @LargeContent");
+            writeStreamingHeader(out, ObjectType.LARGE_CONTENT, name);
+            out.writeVarLong(content.length());
+            try (InputStream source = content.openStream()) { out.copyExactly(source, content.length()); }
+            return;
+        }
+        Class<?> type = value.getClass();
+        if (type.isEnum()) { writeStreamingString(out, ((Enum<?>) value).name(), name); return; }
+        if (value instanceof Byte b) { writeStreamingHeader(out, ObjectType.I8, name); out.writeByte(b); return; }
+        if (type == byte[].class) { writeStreamingBytes(out, (byte[]) value, name); return; }
+        if (value instanceof String s) { writeStreamingString(out, s, name); return; }
+        if (value instanceof Short s) { writeStreamingHeader(out, ObjectType.I16, name); out.writeShort(s); return; }
+        if (value instanceof Integer i) { writeStreamingHeader(out, ObjectType.I32, name); out.writeInt(i); return; }
+        if (value instanceof Long l) { writeStreamingHeader(out, ObjectType.I64, name); out.writeLong(l); return; }
+        if (value instanceof Boolean b) { writeStreamingHeader(out, ObjectType.BOOLEAN, name); out.writeByte(b ? 1 : 0); return; }
+        if (value instanceof Float f) { writeStreamingHeader(out, ObjectType.FLOAT, name); out.writeInt(Float.floatToRawIntBits(f)); return; }
+        if (value instanceof Double d) { writeStreamingHeader(out, ObjectType.DOUBLE, name); out.writeLong(Double.doubleToRawLongBits(d)); return; }
+        if (value instanceof AtomicInteger i) { writeValue(out, i.get(), name, false); return; }
+        if (value instanceof AtomicLong l) { writeValue(out, l.get(), name, false); return; }
+        if (value instanceof AtomicBoolean b) { writeValue(out, b.get(), name, false); return; }
+        if (value instanceof BigInteger || value instanceof BigDecimal || value instanceof Character) {
+            writeStreamingString(out, value.toString(), name); return;
+        }
+        if (type.isArray()) { writeStreamingArray(out, value, name); return; }
+        if (value instanceof Collection<?> collection) { writeStreamingCollection(out, collection, name); return; }
+        if (value instanceof Map<?, ?> map) { writeStreamingMap(out, map, name); return; }
+        if (value instanceof BinaryObjectNode node) { writeStreamingNode(out, node, name); return; }
+        writeStreamingObject(out, value, name);
+    }
+
+    private void writeStreamingObject(StreamingOutput out, Object value, byte[] name) throws IOException {
+        long size = measureObject(value, name);
+        long body = bodySizeFromVariable(size, name);
+        writeStreamingHeader(out, ObjectType.OBJECT, name); out.writeVarLong(body);
+        for (FieldCacheProps props : resolveFields(value.getClass(), SerializationType.ENCODE)) {
+            try {
+                writeValue(out, props.field().get(value), props.elementNameBytes(), props.largeContent());
+            } catch (IllegalAccessException e) {
+                throw new EncodeSerializationException("Failed to access field: " + props.field().getName(), e);
+            }
+        }
+    }
+
+    private void writeStreamingCollection(StreamingOutput out, Collection<?> values, byte[] name) throws IOException {
+        long total = measureCollection(values, name); long body = bodySizeFromVariable(total, name);
+        writeStreamingHeader(out, ObjectType.LIST, name); out.writeVarLong(body);
+        for (Object value : values) writeValue(out, value, EMPTY_NAME_BYTES, false);
+    }
+
+    private void writeStreamingArray(StreamingOutput out, Object values, byte[] name) throws IOException {
+        if (values instanceof byte[] bytes) { writeStreamingBytes(out, bytes, name); return; }
+        long total = measureArray(values, name); long body = bodySizeFromVariable(total, name);
+        writeStreamingHeader(out, ObjectType.LIST, name); out.writeVarLong(body);
+        for (int i = 0; i < Array.getLength(values); i++) writeValue(out, Array.get(values, i), EMPTY_NAME_BYTES, false);
+    }
+
+    private void writeStreamingMap(StreamingOutput out, Map<?, ?> values, byte[] name) throws IOException {
+        long total = measureMap(values, name); long body = bodySizeFromVariable(total, name);
+        writeStreamingHeader(out, ObjectType.OBJECT, name); out.writeVarLong(body);
+        int index = 0;
+        for (Map.Entry<?, ?> entry : values.entrySet()) {
+            byte[] key = Objects.toString(entry.getKey(), String.valueOf(index++)).getBytes(StandardCharsets.UTF_8);
+            writeValue(out, entry.getValue(), key, false);
+        }
+    }
+
+    private void writeStreamingNode(StreamingOutput out, BinaryObjectNode node, byte[] name) throws IOException {
+        ObjectType type = node.getObjectType(); writeStreamingHeader(out, type, name);
+        if (type == ObjectType.NULL) return;
+        if (type == ObjectType.LARGE_CONTENT) {
+            StreamContent content = node.getAsStreamContent(); out.writeVarLong(content.length());
+            try (InputStream source = content.openStream()) { out.copyExactly(source, content.length()); }
+            return;
+        }
+        if (type == ObjectType.OBJECT || type == ObjectType.LIST) {
+            long total = measureNode(node, name); long body = bodySizeFromVariable(total, name); out.writeVarLong(body);
+            for (BinaryObjectNode child : node.getChildren()) {
+                writeStreamingNode(out, child, child.getName().getBytes(StandardCharsets.UTF_8));
+            }
+            return;
+        }
+        byte[] bytes = node.getAsBytes();
+        if (isVariable(type)) out.writeVarLong(bytes.length);
+        out.write(bytes);
+    }
+
+    private void writeStreamingString(StreamingOutput out, String value, byte[] name) throws IOException {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        writeStreamingHeader(out, ObjectType.STRING, name); out.writeVarLong(bytes.length); out.write(bytes);
+    }
+
+    private void writeStreamingBytes(StreamingOutput out, byte[] value, byte[] name) throws IOException {
+        writeStreamingHeader(out, ObjectType.BYTES, name); out.writeVarLong(value.length); out.write(value);
+    }
+
+    private void writeStreamingHeader(StreamingOutput out, ObjectType type, byte[] name) throws IOException {
+        out.writeByte(type.id()); out.writeVarInt(name.length); out.write(name);
+    }
+
+    private long headerSize(byte[] name) { return add(1L + varIntLength(name.length), name.length); }
+    private long fixedSize(byte[] name, long body) { return add(headerSize(name), body); }
+    private long variableSize(byte[] name, long body) { return add(add(headerSize(name), varLongLength(body)), body); }
+    private long bodySizeFromVariable(long total, byte[] name) {
+        long withoutHeader = total - headerSize(name);
+        for (int length = 1; length <= 10; length++) {
+            long body = withoutHeader - length;
+            if (body >= 0 && varLongLength(body) == length) return body;
+        }
+        throw new EncodeSerializationException("Invalid calculated body size");
+    }
+    private boolean isVariable(ObjectType type) {
+        return type == ObjectType.STRING || type == ObjectType.OBJECT || type == ObjectType.LIST
+                || type == ObjectType.BYTES || type == ObjectType.LARGE_CONTENT;
+    }
+    private long add(long left, long right) {
+        try { return Math.addExact(left, right); }
+        catch (ArithmeticException e) { throw new EncodeSerializationException("Encoded size exceeds long range", e); }
+    }
+    private static int varIntLength(int value) {
+        int result = 1; while ((value & ~0x7F) != 0) { result++; value >>>= 7; } return result;
+    }
+    private static int varLongLength(long value) {
+        if (value < 0) throw new EncodeSerializationException("Negative length: " + value);
+        int result = 1; while ((value & ~0x7FL) != 0) { result++; value >>>= 7; } return result;
     }
 
     private void encode(BinaryOutput out, Object value, byte[] fieldNameBytes) {
@@ -425,6 +669,9 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             case I16 -> writeFixedNodeBytes(out, dataBytes, 2, objectType);
             case I32, FLOAT -> writeFixedNodeBytes(out, dataBytes, 4, objectType);
             case I64, DOUBLE -> writeFixedNodeBytes(out, dataBytes, 8, objectType);
+            case LARGE_CONTENT -> throw new EncodeSerializationException(
+                    "Large content nodes require encode(value, OutputStream)"
+            );
         }
     }
 
@@ -457,6 +704,71 @@ public class BinaryObjectEncoderMapper extends BaseBinaryObjectSerializer implem
             return Math.max(128, map.size() * 48);
         }
         return 512;
+    }
+
+    private static final class StreamingOutput {
+        private static final int BUFFER_SIZE = 64 * 1024;
+        private final OutputStream destination;
+        private long position;
+
+        private StreamingOutput(OutputStream destination) {
+            this.destination = destination;
+        }
+
+        private long position() { return position; }
+
+        private void writeByte(int value) throws IOException {
+            destination.write(value);
+            position++;
+        }
+
+        private void writeShort(int value) throws IOException {
+            writeByte(value >>> 8); writeByte(value);
+        }
+
+        private void writeInt(int value) throws IOException {
+            writeByte(value >>> 24); writeByte(value >>> 16); writeByte(value >>> 8); writeByte(value);
+        }
+
+        private void writeLong(long value) throws IOException {
+            writeByte((int) (value >>> 56)); writeByte((int) (value >>> 48));
+            writeByte((int) (value >>> 40)); writeByte((int) (value >>> 32));
+            writeByte((int) (value >>> 24)); writeByte((int) (value >>> 16));
+            writeByte((int) (value >>> 8)); writeByte((int) value);
+        }
+
+        private void writeVarInt(int value) throws IOException {
+            if (value < 0) throw new EncodeSerializationException("Negative varint value: " + value);
+            while ((value & ~0x7F) != 0) { writeByte((value & 0x7F) | 0x80); value >>>= 7; }
+            writeByte(value);
+        }
+
+        private void writeVarLong(long value) throws IOException {
+            if (value < 0) throw new EncodeSerializationException("Negative varlong value: " + value);
+            while ((value & ~0x7FL) != 0) { writeByte(((int) value & 0x7F) | 0x80); value >>>= 7; }
+            writeByte((int) value);
+        }
+
+        private void write(byte[] bytes) throws IOException {
+            destination.write(bytes);
+            position = Math.addExact(position, bytes.length);
+        }
+
+        private void copyExactly(InputStream source, long length) throws IOException {
+            byte[] buffer = new byte[BUFFER_SIZE];
+            long remaining = length;
+            while (remaining > 0) {
+                int read = source.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                if (read < 0) {
+                    throw new EOFException("StreamContent ended early: expected " + length
+                            + " bytes, got " + (length - remaining));
+                }
+                if (read == 0) continue;
+                destination.write(buffer, 0, read);
+                position = Math.addExact(position, read);
+                remaining -= read;
+            }
+        }
     }
 
     private static final class BinaryOutput {

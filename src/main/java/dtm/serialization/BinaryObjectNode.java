@@ -21,6 +21,7 @@ public interface BinaryObjectNode {
     Integer getAsInt();
     Boolean getAsBoolean();
     byte[] getAsBytes();
+    StreamContent getAsStreamContent();
     float getAsFloat();
     double getAsDouble();
     <T> T getAsObject(Class<T> clazz);
