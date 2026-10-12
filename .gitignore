@@ -4,6 +4,10 @@ target/
 !**/src/test/**/target/
 .kotlin
 
+### Orion IDE ###
+.orion/
+
+
 ### IntelliJ IDEA ###
 .idea/modules.xml
 .idea/jarRepositories.xml
